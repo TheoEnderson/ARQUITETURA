@@ -1,8 +1,5 @@
-// Standard integer library
 #include <stdint.h>
-// Standard library
 #include <stdlib.h>
-// Standard I/O library
 #include <stdio.h>
 // História que falou
 #include <limits.h>
@@ -110,6 +107,109 @@ int main(int argc, char* argv[]) {
                     // SLTU (unsigned)
                     reg[rd] = ((uint32_t)reg[rs1] < (uint32_t)reg[rs2]) ? 1 : 0;
                     printf("sltu x%d, x%d, x%d -> x%d = %d\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b000) {
+                    // MUL: low 32 bits de (int32_t)rs1 * (int32_t)rs2
+                    int32_t a = (int32_t)reg[rs1];
+                    int32_t b = (int32_t)reg[rs2];
+                    int64_t p = (int64_t)a * (int64_t)b;   // produto 64 bits
+                    reg[rd] = (uint32_t)(p & 0xFFFFFFFFu); // mantém só os 32 bits baixos
+
+                    printf("mul x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b001) {
+                    // MULH: signed * signed, parte alta do resultado de 64 bits
+                    int64_t a = (int64_t)(int32_t)reg[rs1];
+                    int64_t b = (int64_t)(int32_t)reg[rs2];
+                    int64_t prod = a * b;
+
+                    // Pega os 32 bits mais altos do produto
+                    uint32_t high = (uint32_t)((prod >> 32) & 0xFFFFFFFFu);
+                    reg[rd] = high;
+
+                    printf("mulh x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b010) {
+                    // MULHSU: signed * unsigned, retorna parte alta (bits 63..32)
+                    int64_t  a = (int64_t)(int32_t)reg[rs1];   // sign-extend
+                    uint64_t b = (uint64_t)(uint32_t)reg[rs2]; // zero-extend
+
+                    // Produto de 64 bits é suficiente (32x32 -> 64). Para máxima segurança:
+                    __int128 prod = (__int128)a * (__int128)b;
+
+                    uint32_t high = (uint32_t)((prod >> 32) & 0xFFFFFFFF);
+                    reg[rd] = high;
+
+                    printf("mulhsu x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b011) {
+                    // MULHU: unsigned * unsigned, parte alta (bits 63..32)
+                    uint64_t a = (uint64_t)(uint32_t)reg[rs1];
+                    uint64_t b = (uint64_t)(uint32_t)reg[rs2];
+                    uint64_t prod = a * b;                  // 32x32 -> 64 bits
+                    reg[rd] = (uint32_t)((prod >> 32) & 0xFFFFFFFFu);
+
+                    printf("mulhu x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b100) {
+                    // DIV (signed)
+                    int32_t a = (int32_t)reg[rs1];
+                    int32_t b = (int32_t)reg[rs2];
+                    uint32_t res;
+
+                    if (b == 0) {
+                        res = 0xFFFFFFFFu; // -1
+                    } else if (a == INT32_MIN && b == -1) {
+                        res = (uint32_t)INT32_MIN; // overflow definido pela especificação
+                    } else {
+                        res = (uint32_t)(a / b); // divisão com sinal, trunca para zero
+                    }
+
+                    reg[rd] = res;
+                    printf("div x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b101) {
+                    // DIVU (unsigned)
+                    uint32_t a = reg[rs1];
+                    uint32_t b = reg[rs2];
+
+                    reg[rd] = (b == 0) ? 0xFFFFFFFFu : (a / b);
+
+                    printf("divu x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b110) {
+                    // REM (signed remainder)
+                    int32_t a = (int32_t)reg[rs1];
+                    int32_t b = (int32_t)reg[rs2];
+                    uint32_t res;
+
+                    if (b == 0) {
+                        res = (uint32_t)a;              // resto = dividendo
+                    } else if (a == INT32_MIN && b == -1) {
+                        res = 0;                        // caso de overflow definido
+                    } else {
+                        res = (uint32_t)(a % b);        // resto com sinal (segue o dividendo)
+                    }
+
+                    reg[rd] = res;
+                    printf("rem x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b111) {
+                    // REMU (unsigned remainder)
+                    uint32_t a = reg[rs1];
+                    uint32_t b = reg[rs2];
+
+                    reg[rd] = (b == 0) ? a : (a % b);
+
+                    printf("remu x%d, x%d, x%d -> x%d = 0x%08X\n",
                         rd, rs1, rs2, rd, reg[rd]);
                 }
                 // x0 sempre 0
@@ -284,17 +384,159 @@ int main(int argc, char* argv[]) {
                 reg[0] = 0; // x0 sempre 0
                 break;
             }
+            case 0b1100011: { // Branches (Tipo B)
+                // Reconstrói imm de 13 bits (inclui o bit zero implícito)
+                uint32_t imm_12   = (instr >> 31) & 0x1;
+                uint32_t imm_10_5 = (instr >> 25) & 0x3F;
+                uint32_t imm_4_1  = (instr >> 8)  & 0xF;
+                uint32_t imm_11   = (instr >> 7)  & 0x1;
 
+                uint32_t imm13u = (imm_12   << 12) |
+                                (imm_11   << 11) |
+                                (imm_10_5 << 5 ) |
+                                (imm_4_1  << 1 );   // bit 0 é 0
 
+                int32_t imm = (imm13u & 0x1000) ? (int32_t)(imm13u | 0xFFFFE000)
+                                                : (int32_t)imm13u;
+
+                uint32_t target = (uint32_t)(pc + imm);
+
+                if (funct3 == 0b000) {
+                    // BEQ: branch if equal
+                    int taken = (reg[rs1] == reg[rs2]);
+                    if (taken) {
+                        pc = target;
+                    } else {
+                        pc += 4; // se o seu loop já faz pc+=4 no fetch, remova esta linha
+                    }
+                    printf("beq x%d, x%d, %d -> %s (pc=0x%08X)\n",
+                        rs1, rs2, imm, taken ? "taken" : "not taken", pc);
+                }
+                else if (funct3 == 0b001) {
+                    // BNE
+                    int taken = (reg[rs1] != reg[rs2]);
+                    if (taken) pc = target;
+                    else       pc += 4;
+                    printf("bne x%d, x%d, %d -> %s (pc=0x%08X)\n",
+                        rs1, rs2, imm, taken ? "taken" : "not taken", pc);
+                }
+                else if (funct3 == 0b100) {
+                    // BLT (signed)
+                    int taken = ((int32_t)reg[rs1] < (int32_t)reg[rs2]);
+                    pc = taken ? target : pc + 4;
+                    printf("blt x%d, x%d, %d -> %s (pc=0x%08X)\n",
+                        rs1, rs2, imm, taken ? "taken" : "not taken", pc);
+                }
+                else if (funct3 == 0b101) {
+                    // BGE (signed)
+                    int taken = ((int32_t)reg[rs1] >= (int32_t)reg[rs2]);
+                    pc = taken ? target : pc + 4;
+                    printf("bge x%d, x%d, %d -> %s (pc=0x%08X)\n",
+                        rs1, rs2, imm, taken ? "taken" : "not taken", pc);
+                }
+                else if (funct3 == 0b110) {
+                    // BLTU (unsigned)
+                    int taken = ((uint32_t)reg[rs1] < (uint32_t)reg[rs2]);
+                    pc = taken ? target : pc + 4;
+                    printf("bltu x%d, x%d, %d -> %s (pc=0x%08X)\n",
+                        rs1, rs2, imm, taken ? "taken" : "not taken", pc);
+                }
+                else if (funct3 == 0b111) {
+                    // BGEU (unsigned)
+                    int taken = ((uint32_t)reg[rs1] >= (uint32_t)reg[rs2]);
+                    pc = taken ? target : pc + 4;
+                    printf("bgeu x%d, x%d, %d -> %s (pc=0x%08X)\n",
+                        rs1, rs2, imm, taken ? "taken" : "not taken", pc);
+                }
+
+                reg[0] = 0; // x0 sempre 0
+                break;
             }
+            case 0b1100111: { // JALR (Jump And Link Register)
+                // Extrai imediato de 12 bits (bits [31:20])
+                uint32_t imm12 = instr >> 20;
+                int32_t imm = (imm12 & 0x800) ? (int32_t)(imm12 | 0xFFFFF000)
+                                            : (int32_t)imm12;
 
+                if (funct3 == 0b000) {
+                    // JALR
+                    uint32_t return_addr = pc + 4;               // endereço de retorno
+                    uint32_t target = (reg[rs1] + imm) & ~1U;    // bit 0 zerado
 
+                    reg[rd] = return_addr;                       // salva endereço de retorno
+                    pc = target;                                 // desvia para o destino
 
+                    printf("jalr x%d, %d(x%d) -> pc=0x%08X, x%d=0x%08X\n",
+                        rd, imm, rs1, pc, rd, reg[rd]);
+                }
 
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+            case 0b1101111: { // JAL (Jump And Link) - Formato J
+                // Reconstrói o imediato J-type (21 bits com bit 0 = 0)
+                uint32_t imm_20    = (instr >> 31) & 0x1;
+                uint32_t imm_10_1  = (instr >> 21) & 0x3FF; // bits 30..21
+                uint32_t imm_11    = (instr >> 20) & 0x1;   // bit 20
+                uint32_t imm_19_12 = (instr >> 12) & 0xFF;  // bits 19..12
 
+                uint32_t imm21u = (imm_20    << 20) |
+                                (imm_19_12 << 12) |
+                                (imm_11    << 11) |
+                                (imm_10_1  << 1);  // bit 0 implícito = 0
 
+                int32_t imm = (imm21u & 0x00100000) ? (int32_t)(imm21u | 0xFFE00000)
+                                                    : (int32_t)imm21u;
 
+                uint32_t ret = pc + 4;          // endereço de retorno
+                uint32_t target = (uint32_t)(pc + imm);
 
+                reg[rd] = ret;                   // rd recebe pc+4
+                pc = target;                     // salta para pc + imm
+
+                printf("jal x%d, %d -> pc=0x%08X, x%d=0x%08X\n",
+                    rd, imm, pc, rd, reg[rd]);
+
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+            case 0b0110111: { // LUI (Load Upper Immediate)
+                // Extrai imm[31:12] e desloca 12 bits à esquerda
+                uint32_t imm20 = instr & 0xFFFFF000;
+                reg[rd] = imm20;
+
+                printf("lui x%d, 0x%05X -> x%d = 0x%08X\n",
+                    rd, imm20 >> 12, rd, reg[rd]);
+
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+            case 0b0010111: { // AUIPC (Add Upper Immediate to PC)
+                // Extrai imm[31:12] e desloca 12 bits à esquerda
+                uint32_t imm20 = instr & 0xFFFFF000;
+                reg[rd] = pc + imm20;
+
+                printf("auipc x%d, 0x%05X -> x%d = 0x%08X (pc=0x%08X)\n",
+                    rd, imm20 >> 12, rd, reg[rd], pc);
+
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+            case 0b1110011: { // System (ECALL / EBREAK)
+                uint32_t imm12 = instr >> 20; // bits [31:20]
+
+                if (funct3 == 0b000 && imm12 == 0x001) {
+                    // EBREAK
+                    printf("ebreak -> execução interrompida\n");
+                    running = 0; // variável de controle do loop principal
+                }
+                else if (funct3 == 0b000 && imm12 == 0x000) {
+                    // ECALL (opcional)
+                    printf("ecall -> chamada de sistema\n");
+                }
+
+                break;
+            }
 			default:
 				// Outputting error message
 				printf("error: unknown instruction opcode at pc = 0x%08x\n", pc);
