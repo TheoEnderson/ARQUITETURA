@@ -1,0 +1,314 @@
+// Standard integer library
+#include <stdint.h>
+// Standard library
+#include <stdlib.h>
+// Standard I/O library
+#include <stdio.h>
+// História que falou
+#include <limits.h>
+
+
+int main(int argc, char* argv[]) {
+	// Outputting separator
+	printf("--------------------------------------------------------------------------------\n");
+	// Iterating over arguments
+	for(uint32_t i = 0; i < argc; i++) {
+		// Outputting argument
+		printf("argv[%i] = %s\n", i, argv[i]);
+	}
+	// Opening input and output files using proper permissions
+	FILE* input = fopen(argv[1], "r");
+	FILE* output = fopen(argv[2], "w");
+	// Setting memory offset to 0x80000000
+	const uint32_t offset = 0x80000000;
+	// Creating 32 registers initialized with zero and labels
+	uint32_t x[32] = { 0 };
+	const char* x_label[32] = { "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6" };
+	// Creating pc register initialized with memory offset
+	uint32_t pc = offset;
+	// Creating 32 KiB memory for both data and instructions
+	uint8_t* mem = (uint8_t*)(malloc(32 * 1024));
+	
+	
+	// Outputting separator
+	printf("--------------------------------------------------------------------------------\n");
+	// Setting run condition
+	uint8_t run = 1;
+	// Loop while condition is true
+	while(run) {
+		// Reading instruction from memory (4 byte alignment)
+		const uint32_t instruction = ((uint32_t*)(mem))[(pc - offset) >> 2];
+		// Retrieving instruction opcode (6:0)
+		const uint8_t opcode = instruction & 0b1111111;
+		// Retrieving instruction fields
+		const uint8_t funct7 = instruction >> 25;
+		const uint16_t imm = instruction >> 20;
+		const uint8_t uimm = (instruction & (0b11111 << 20)) >> 20;
+		const uint8_t rs1 = (instruction & (0b11111 << 15)) >> 15;
+        const uint8_t rs2 = (instruction & (0b11111 << 20)) >> 20;
+		const uint8_t funct3 = (instruction & (0b111 << 12)) >> 12;
+		const uint8_t rd = (instruction & (0b11111 << 7)) >> 7;
+		const uint32_t imm20 = ((instruction >> 31) << 19) | (((instruction & (0b11111111 << 12)) >> 12) << 11) | (((instruction & (0b1 << 20)) >> 20) << 10) | ((instruction & (0b1111111111 << 21)) >> 21);
+		// Checking instruction opcode
+		switch(opcode) {
+            case 0b0110011: { //Tipo R
+                if(funct3 == 0b000 && funct7 == 0b0000000){
+                    // ADD
+                    reg[rd] = reg[rs1] + reg[rs2];
+                    printf("add x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct3 == 0b000 && funct7 == 0b0100000) {
+                    // SUB
+                    reg[rd] = reg[rs1] - reg[rs2];
+                    printf("sub x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct3 == 0b111 && funct7 == 0b0000000) {
+                    // AND
+                    reg[rd] = reg[rs1] & reg[rs2];
+                    printf("and x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct3 == 0b110 && funct7 == 0b0000000) {
+                    // OR
+                    reg[rd] = reg[rs1] | reg[rs2];
+                    printf("or x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct3 == 0b100 && funct7 == 0b0000000) {
+                    // XOR
+                    reg[rd] = reg[rs1] ^ reg[rs2];
+                    printf("xor x%d, x%d, x%d -> x%d = 0x%08X\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct3 == 0b001 && funct7 == 0b0000000) {
+                    // SLL
+                    reg[rd] = reg[rs1] << (reg[rs2] & 0x1F);
+                    printf("sll x%d, x%d, x%d -> x%d = 0x%08X (shift = %d)\n",
+                        rd, rs1, rs2, rd, reg[rd], reg[rs2] & 0x1F);
+                }
+                else if (funct3 == 0b101 && funct7 == 0b0000000) {
+                    // SRL
+                    reg[rd] = (unsigned int)reg[rs1] >> (reg[rs2] & 0x1F);
+                    printf("srl x%d, x%d, x%d -> x%d = 0x%08X (shift = %d)\n",
+                        rd, rs1, rs2, rd, reg[rd], reg[rs2] & 0x1F);
+                }
+                else if (funct3 == 0b101 && funct7 == 0b0100000) {
+                    // SRA (aritmético - preserva sinal)
+                    reg[rd] = ((int32_t)reg[rs1]) >> (reg[rs2] & 0x1F);
+                    printf("sra x%d, x%d, x%d -> x%d = 0x%08X (shift = %d)\n",
+                        rd, rs1, rs2, rd, reg[rd], reg[rs2] & 0x1F);
+                }
+                else if (funct3 == 0b010 && funct7 == 0b0000000) {
+                    // SLT (signed comparison)
+                    reg[rd] = ((int32_t)reg[rs1] < (int32_t)reg[rs2]) ? 1 : 0;
+                    printf("slt x%d, x%d, x%d -> x%d = %d\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                else if (funct3 == 0b011 && funct7 == 0b0000000) {
+                    // SLTU (unsigned)
+                    reg[rd] = ((uint32_t)reg[rs1] < (uint32_t)reg[rs2]) ? 1 : 0;
+                    printf("sltu x%d, x%d, x%d -> x%d = %d\n",
+                        rd, rs1, rs2, rd, reg[rd]);
+                }
+                // x0 sempre 0
+                reg[0] = 0;
+                break;
+            }
+            case 0b0010011: { // Tipo I (ALU imediato)
+                uint32_t imm12 = instr >> 20; // bits [31:20]
+                int32_t imm = (imm12 & 0x800) ? (int32_t)(imm12 | 0xFFFFF000)
+                                            : (int32_t)imm12;
+
+                if (funct3 == 0b000) {
+                    // ADDI
+                    reg[rd] = reg[rs1] + imm;
+                    printf("addi x%d, x%d, %d -> x%d = 0x%08X\n",
+                        rd, rs1, imm, rd, reg[rd]);
+                }
+                else if (funct3 == 0b111) {
+                    // ANDI
+                    reg[rd] = reg[rs1] & imm;
+                    printf("andi x%d, x%d, 0x%X -> x%d = 0x%08X\n",
+                        rd, rs1, imm, rd, reg[rd]);
+                }
+                else if (funct3 == 0b110) {
+                    // ORI
+                    reg[rd] = reg[rs1] | imm;
+                    printf("ori x%d, x%d, 0x%X -> x%d = 0x%08X\n",
+                        rd, rs1, imm, rd, reg[rd]);
+                }
+                else if (funct3 == 0b100) {
+                    // XORI
+                    reg[rd] = reg[rs1] ^ imm;
+                    printf("xori x%d, x%d, 0x%X -> x%d = 0x%08X\n",
+                        rd, rs1, imm, rd, reg[rd]);
+                }
+                else if (funct3 == 0b010) {
+                    // SLTI (signed)
+                    reg[rd] = ((int32_t)reg[rs1] < imm) ? 1 : 0;
+                    printf("slti x%d, x%d, %d -> x%d = %d\n",
+                        rd, rs1, imm, rd, reg[rd]);
+                }
+                else if (funct3 == 0b011) {
+                    // SLTIU (unsigned)
+                    reg[rd] = ((uint32_t)reg[rs1] < (uint32_t)imm) ? 1 : 0;
+                    printf("sltiu x%d, x%d, %d -> x%d = %d\n",
+                        rd, rs1, imm, rd, reg[rd]);
+                }
+                else if (funct3 == 0b001) {
+                    // SLLI
+                    if ((imm12 & 0xFE0) == 0x000) {
+                        uint32_t shamt = imm12 & 0x1F;
+                        reg[rd] = reg[rs1] << shamt;
+                        printf("slli x%d, x%d, %u -> x%d = 0x%08X\n",
+                            rd, rs1, shamt, rd, reg[rd]);
+                    } else {
+                        printf("Erro: funct7 inválido em SLLI (0x%X)\n", (imm12 >> 5) & 0x7F);
+                    }
+                }
+                else if (funct3 == 0b101) {
+                    // SRLI ou SRAI
+                    uint32_t funct7 = (imm12 >> 5) & 0x7F;
+                    uint32_t shamt = imm12 & 0x1F;
+
+                    if (funct7 == 0b0000000) {
+                        // SRLI (lógico)
+                        reg[rd] = (uint32_t)reg[rs1] >> shamt;
+                        printf("srli x%d, x%d, %u -> x%d = 0x%08X\n",
+                            rd, rs1, shamt, rd, reg[rd]);
+                    }
+                    else if (funct7 == 0b0100000) {
+                        // SRAI (aritmético)
+                        reg[rd] = ((int32_t)reg[rs1]) >> shamt;
+                        printf("srai x%d, x%d, %u -> x%d = 0x%08X\n",
+                            rd, rs1, shamt, rd, reg[rd]);
+                    }
+                    else {
+                        printf("Erro: funct7 inválido em SRLI/SRAI (0x%X)\n", funct7);
+                    }
+                }
+
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+            case 0b0000011: { // Loads (Tipo I)
+                uint32_t imm12 = instr >> 20; // bits [31:20]
+                int32_t imm = (imm12 & 0x800) ? (int32_t)(imm12 | 0xFFFFF000)
+                                            : (int32_t)imm12;
+                uint32_t addr = (uint32_t)(reg[rs1] + imm);
+
+                if (funct3 == 0b000) {
+                    // LB (signed)
+                    uint8_t byte = memory[addr];
+                    reg[rd] = (uint32_t)(int8_t)byte;
+                    printf("lb x%d, %d(x%d) [addr=0x%08X] -> x%d = 0x%08X\n",
+                        rd, imm, rs1, addr, rd, reg[rd]);
+                }
+                else if (funct3 == 0b001) {
+                    // LH (signed)
+                    uint16_t half = memory[addr] | (memory[addr + 1] << 8);
+                    reg[rd] = (uint32_t)(int16_t)half;
+                    printf("lh x%d, %d(x%d) [addr=0x%08X] -> x%d = 0x%08X\n",
+                        rd, imm, rs1, addr, rd, reg[rd]);
+                }
+                else if (funct3 == 0b010) {
+                    // LW (signed 32 bits)
+                    uint32_t w =  (uint32_t)memory[addr]
+                                | ((uint32_t)memory[addr + 1] << 8)
+                                | ((uint32_t)memory[addr + 2] << 16)
+                                | ((uint32_t)memory[addr + 3] << 24);
+                    reg[rd] = w;
+                    printf("lw x%d, %d(x%d) [addr=0x%08X] -> x%d = 0x%08X\n",
+                        rd, imm, rs1, addr, rd, reg[rd]);
+                }
+                else if (funct3 == 0b100) {
+                    // LBU: load byte unsigned (zero-extend)
+                    uint8_t byte = memory[addr];
+                    reg[rd] = (uint32_t)byte;
+                    printf("lbu x%d, %d(x%d) [addr=0x%08X] -> x%d = 0x%02X\n",
+                        rd, imm, rs1, addr, rd, reg[rd]);
+                }
+                else if (funct3 == 0b101) {
+                    // LHU (unsigned)
+                    uint16_t half = memory[addr] | (memory[addr + 1] << 8);
+                    reg[rd] = (uint32_t)half;  // zero-extend
+                    printf("lhu x%d, %d(x%d) [addr=0x%08X] -> x%d = 0x%04X\n",
+                        rd, imm, rs1, addr, rd, reg[rd]);
+                }
+
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+            case 0b0100011: { // Stores (Tipo S)
+                // Monta imm[11:0] a partir de [31:25] e [11:7]
+                uint32_t imm_high = (instr >> 25) & 0x7F;  // bits 31..25
+                uint32_t imm_low  = (instr >> 7)  & 0x1F;  // bits 11..7
+                uint32_t imm12u   = (imm_high << 5) | imm_low;
+                int32_t  imm      = (imm12u & 0x800) ? (int32_t)(imm12u | 0xFFFFF000)
+                                                    : (int32_t)imm12u;
+
+                uint32_t addr = (uint32_t)(reg[rs1] + imm);
+
+                if (funct3 == 0b000) {
+                    // SB
+                    memory[addr] = (uint8_t)(reg[rs2] & 0xFF);
+                    printf("sb x%d, %d(x%d) [addr=0x%08X] <- 0x%02X\n",
+                        rs2, imm, rs1, addr, reg[rs2] & 0xFF);
+                }
+                else if (funct3 == 0b001) {
+                    // SH
+                    uint16_t half = (uint16_t)(reg[rs2] & 0xFFFF);
+                    memory[addr]     = (uint8_t)(half & 0xFF);
+                    memory[addr + 1] = (uint8_t)((half >> 8) & 0xFF);
+                    printf("sh x%d, %d(x%d) [addr=0x%08X] <- 0x%04X\n",
+                        rs2, imm, rs1, addr, half);
+                }
+                else if (funct3 == 0b010) {
+                    // SW: store word (32 bits), little-endian
+                    // (opcional) checagens:
+                    // if (addr + 3 >= MEM_SIZE) { printf("Erro: SW fora da memória\n"); break; }
+                    // if (addr & 0x3) { printf("Aviso: SW desalinhado em 0x%08X\n", addr); }
+
+                    uint32_t w = (uint32_t)reg[rs2];
+                    memory[addr]     = (uint8_t)( w        & 0xFF);
+                    memory[addr + 1] = (uint8_t)((w >> 8)  & 0xFF);
+                    memory[addr + 2] = (uint8_t)((w >> 16) & 0xFF);
+                    memory[addr + 3] = (uint8_t)((w >> 24) & 0xFF);
+
+                    printf("sw x%d, %d(x%d) [addr=0x%08X] <- 0x%08X\n",
+                        rs2, imm, rs1, addr, w);
+                }
+
+                reg[0] = 0; // x0 sempre 0
+                break;
+            }
+
+
+            }
+
+
+
+
+
+
+
+
+			default:
+				// Outputting error message
+				printf("error: unknown instruction opcode at pc = 0x%08x\n", pc);
+				// Halting simulation
+				run = 0;
+		}
+		// Incrementing pc by 4
+		pc = pc + 4;
+	}
+	// Closing input and output files
+	fclose(input);
+	fclose(output);
+	// Outputting separator
+	printf("--------------------------------------------------------------------------------\n");
+	// Returning success status
+	return 0;
+}
