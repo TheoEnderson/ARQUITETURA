@@ -17,6 +17,17 @@ static inline const char* rname(int r) {
     return x_label[r & 31];
 }
 
+// Helper para padronizar o alinhamento do output (tela + arquivo)
+static void out2(FILE* output,
+                 uint32_t pc, const char* mnem,
+                 const char* ops, const char* msg)
+{
+    // %-6s  = mnem em 6 colunas
+    // %-18s = operandos em 18 colunas
+    printf ( "0x%08x:%-6s %-18s %s\n", pc, mnem, ops, msg );
+    fprintf(output, "0x%08x:%-6s %-18s %s\n", pc, mnem, ops, msg );
+}
+
 int main(int argc, char* argv[]) {
     printf("--------------------------------------------------------------------------------\n");
 
@@ -35,6 +46,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Memória e registradores
     uint8_t* mem = (uint8_t*)malloc(MEM_SIZE);
     if (!mem) {
         fprintf(stderr, "erro: malloc MEM_SIZE\n");
@@ -45,7 +57,7 @@ int main(int argc, char* argv[]) {
     uint32_t x[32] = {0};
     uint32_t pc = BASE_ADDR;
 
-    // Loader: linhas "@<hexaddr>" seguidas por bytes hex
+    // Loader: linhas com "@<hexaddr>" seguidas por bytes hex
     {
         uint32_t load_addr = 0;
         char line[4096];
@@ -75,7 +87,7 @@ int main(int argc, char* argv[]) {
 
     uint8_t running = 1;
     while (running) {
-        // Fetch LE seguro
+        // Fetch LE
         if (pc < BASE_ADDR || (pc - BASE_ADDR + 3u) >= MEM_SIZE) {
             printf("error: PC fora da memória em pc=0x%08x\n", pc);
             fprintf(output, "error: PC fora da memória em pc=0x%08x\n", pc);
@@ -105,158 +117,171 @@ int main(int argc, char* argv[]) {
 
             // -------------------- Tipo R (inclui Extensão M) --------------------
             case 0b0110011: {
+                // Lógicos / aritméticos básicos
                 if (funct7 == 0b0000000 && funct3 == 0b000) { // ADD
                     uint32_t a = x[rs1], b = x[rs2];
                     x[rd] = a + b;
-                    printf("0x%08x:add    %s,%s,%s          %s=0x%08x+0x%08x=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2),
-                           rname(rd), a, b, x[rd]);
-                    fprintf(output, "0x%08x:add    %s,%s,%s          %s=0x%08x+0x%08x=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2),
-                            rname(rd), a, b, x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x+0x%08x=0x%08x", rname(rd), a, b, x[rd]);
+                    out2(output, pc_curr, "add", ops, msg);
                 }
                 else if (funct7 == 0b0100000 && funct3 == 0b000) { // SUB
                     uint32_t a = x[rs1], b = x[rs2];
                     x[rd] = a - b;
-                    printf("0x%08x:sub    %s,%s,%s          %s=0x%08x-0x%08x=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2),
-                           rname(rd), a, b, x[rd]);
-                    fprintf(output, "0x%08x:sub    %s,%s,%s          %s=0x%08x-0x%08x=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2),
-                            rname(rd), a, b, x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x-0x%08x=0x%08x", rname(rd), a, b, x[rd]);
+                    out2(output, pc_curr, "sub", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b111) { // AND
-                    x[rd] = x[rs1] & x[rs2];
-                    printf("0x%08x:and    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:and    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t a = x[rs1] & x[rs2];
+                    x[rd] = a;
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "and", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b110) { // OR
-                    x[rd] = x[rs1] | x[rs2];
-                    printf("0x%08x:or     %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:or     %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t a = x[rs1] | x[rs2];
+                    x[rd] = a;
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "or", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b100) { // XOR
-                    x[rd] = x[rs1] ^ x[rs2];
-                    printf("0x%08x:xor    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:xor    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t a = x[rs1] ^ x[rs2];
+                    x[rd] = a;
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "xor", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b001) { // SLL
-                    x[rd] = x[rs1] << (x[rs2] & 0x1F);
-                    printf("0x%08x:sll    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:sll    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t sh = x[rs2] & 0x1F;
+                    x[rd] = x[rs1] << sh;
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "sll", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b101) { // SRL
-                    x[rd] = (uint32_t)x[rs1] >> (x[rs2] & 0x1F);
-                    printf("0x%08x:srl    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:srl    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t sh = x[rs2] & 0x1F;
+                    x[rd] = (uint32_t)x[rs1] >> sh;
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "srl", ops, msg);
                 }
                 else if (funct7 == 0b0100000 && funct3 == 0b101) { // SRA
-                    x[rd] = ((int32_t)x[rs1]) >> (x[rs2] & 0x1F);
-                    printf("0x%08x:sra    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:sra    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t sh = x[rs2] & 0x1F;
+                    x[rd] = ((int32_t)x[rs1]) >> sh;
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "sra", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b010) { // SLT
                     x[rd] = ((int32_t)x[rs1] < (int32_t)x[rs2]) ? 1u : 0u;
-                    printf("0x%08x:slt    %s,%s,%s          %s=%u\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:slt    %s,%s,%s          %s=%u\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=%u", rname(rd), x[rd]);
+                    out2(output, pc_curr, "slt", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b011) { // SLTU
                     x[rd] = ((uint32_t)x[rs1] < (uint32_t)x[rs2]) ? 1u : 0u;
-                    printf("0x%08x:sltu   %s,%s,%s          %s=%u\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:sltu   %s,%s,%s          %s=%u\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=%u", rname(rd), x[rd]);
+                    out2(output, pc_curr, "sltu", ops, msg);
                 }
                 // ------ Extensão M ------
                 else if (funct7 == 0b0000001 && funct3 == 0b000) { // MUL
                     int32_t a = (int32_t)x[rs1], b = (int32_t)x[rs2];
                     int64_t p = (int64_t)a * (int64_t)b;
                     x[rd] = (uint32_t)p;
-                    printf("0x%08x:mul    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:mul    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x*0x%08x=0x%08x",
+                             rname(rd), (uint32_t)a, (uint32_t)b, x[rd]);
+                    out2(output, pc_curr, "mul", ops, msg);
                 }
                 else if (funct7 == 0b0000001 && funct3 == 0b001) { // MULH
                     int64_t a = (int64_t)(int32_t)x[rs1];
                     int64_t b = (int64_t)(int32_t)x[rs2];
                     int64_t prod = a * b;
                     x[rd] = (uint32_t)((uint64_t)prod >> 32);
-                    printf("0x%08x:mulh   %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:mulh   %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x*0x%08x=0x%08x",
+                             rname(rd), (uint32_t)(int32_t)a, (uint32_t)(int32_t)b, x[rd]);
+                    out2(output, pc_curr, "mulh", ops, msg);
                 }
                 else if (funct7 == 0b0000001 && funct3 == 0b010) { // MULHSU
                     int64_t  a = (int64_t)(int32_t)x[rs1];
                     uint64_t b = (uint64_t)x[rs2];
                     __int128 prod = (__int128)a * (__int128)b;
-                    x[rd] = (uint32_t)(((__int128)prod >> 32) & 0xFFFFFFFF);
-                    printf("0x%08x:mulhsu %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:mulhsu %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    x[rd] = (uint32_t)((prod >> 32) & 0xFFFFFFFF);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x*0x%08x=0x%08x",
+                             rname(rd), (uint32_t)(int32_t)a, (uint32_t)b, x[rd]);
+                    out2(output, pc_curr, "mulhsu", ops, msg);
                 }
                 else if (funct7 == 0b0000001 && funct3 == 0b011) { // MULHU
                     uint64_t a = (uint64_t)x[rs1], b = (uint64_t)x[rs2];
                     uint64_t prod = a * b;
                     x[rd] = (uint32_t)(prod >> 32);
-                    printf("0x%08x:mulhu  %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:mulhu  %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x*0x%08x=0x%08x",
+                             rname(rd), (uint32_t)a, (uint32_t)b, x[rd]);
+                    out2(output, pc_curr, "mulhu", ops, msg);
                 }
-                else if (funct7 == 0b0000001 && funct3 == 0b100) { // DIV
+                else if (funct7 == 0b0000001 && funct3 == 0b100) { // DIV (signed)
                     int32_t a = (int32_t)x[rs1], b = (int32_t)x[rs2];
-                    uint32_t res = (b == 0) ? 0xFFFFFFFFu :
-                                   (a == INT32_MIN && b == -1) ? (uint32_t)INT32_MIN :
-                                   (uint32_t)(a / b);
+                    uint32_t res;
+                    if (b == 0) res = 0xFFFFFFFFu;
+                    else if (a == INT32_MIN && b == -1) res = (uint32_t)INT32_MIN;
+                    else res = (uint32_t)(a / b);
                     x[rd] = res;
-                    printf("0x%08x:div    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:div    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x/0x%08x=0x%08x",
+                             rname(rd), (uint32_t)a, (uint32_t)b, x[rd]);
+                    out2(output, pc_curr, "div", ops, msg);
                 }
                 else if (funct7 == 0b0000001 && funct3 == 0b101) { // DIVU
                     uint32_t a = x[rs1], b = x[rs2];
-                    x[rd] = (b == 0) ? 0xFFFFFFFFu : (a / b);
-                    printf("0x%08x:divu   %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:divu   %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                }
-                else if (funct7 == 0b0000001 && funct3 == 0b110) { // REM
-                    int32_t a = (int32_t)x[rs1], b = (int32_t)x[rs2];
-                    uint32_t res = (b == 0) ? (uint32_t)a :
-                                   (a == INT32_MIN && b == -1) ? 0u :
-                                   (uint32_t)(a % b);
+                    uint32_t res = (b == 0) ? 0xFFFFFFFFu : (a / b);
                     x[rd] = res;
-                    printf("0x%08x:rem    %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:rem    %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x/0x%08x=0x%08x", rname(rd), a, b, x[rd]);
+                    out2(output, pc_curr, "divu", ops, msg);
+                }
+                else if (funct7 == 0b0000001 && funct3 == 0b110) { // REM (signed)
+                    int32_t a = (int32_t)x[rs1], b = (int32_t)x[rs2];
+                    uint32_t res;
+                    if (b == 0) res = (uint32_t)a;
+                    else if (a == INT32_MIN && b == -1) res = 0u;
+                    else res = (uint32_t)(a % b);
+                    x[rd] = res;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x%%0x%08x=0x%08x",
+                             rname(rd), (uint32_t)a, (uint32_t)b, x[rd]);
+                    out2(output, pc_curr, "rem", ops, msg);
                 }
                 else if (funct7 == 0b0000001 && funct3 == 0b111) { // REMU
                     uint32_t a = x[rs1], b = x[rs2];
-                    x[rd] = (b == 0) ? a : (a % b);
-                    printf("0x%08x:remu   %s,%s,%s          %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:remu   %s,%s,%s          %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), rname(rs2), rname(rd), x[rd]);
+                    uint32_t res = (b == 0) ? a : (a % b);
+                    x[rd] = res;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x%%0x%08x=0x%08x", rname(rd), a, b, x[rd]);
+                    out2(output, pc_curr, "remu", ops, msg);
                 }
                 else {
                     printf("0x%08x:error  R-type desconhecido\n", pc_curr);
@@ -270,49 +295,47 @@ int main(int argc, char* argv[]) {
             case 0b0010011: {
                 if (funct3 == 0b000) { // ADDI
                     uint32_t rs1_before = x[rs1];
-                    uint32_t imm12z = (uint32_t)(imm12 & 0xFFF);
                     x[rd] = rs1_before + imm12;
-                    printf("0x%08x:addi   %s,%s,0x%03x         %s=0x%08x+0x%08x=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), imm12z,
-                           rname(rd), rs1_before, (uint32_t)imm12, x[rd]);
-                    fprintf(output, "0x%08x:addi   %s,%s,0x%03x         %s=0x%08x+0x%08x=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), imm12z,
-                            rname(rd), rs1_before, (uint32_t)imm12, x[rd]);
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x+0x%08x=0x%08x",
+                             rname(rd), rs1_before, (uint32_t)imm12, x[rd]);
+                    out2(output, pc_curr, "addi", ops, msg);
                 }
                 else if (funct3 == 0b111) { // ANDI
                     x[rd] = x[rs1] & (uint32_t)imm12;
-                    printf("0x%08x:andi   %s,%s,0x%03x         %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:andi   %s,%s,0x%03x         %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "andi", ops, msg);
                 }
                 else if (funct3 == 0b110) { // ORI
                     x[rd] = x[rs1] | (uint32_t)imm12;
-                    printf("0x%08x:ori    %s,%s,0x%03x         %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:ori    %s,%s,0x%03x         %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "ori", ops, msg);
                 }
                 else if (funct3 == 0b100) { // XORI
                     x[rd] = x[rs1] ^ (uint32_t)imm12;
-                    printf("0x%08x:xori   %s,%s,0x%03x         %s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:xori   %s,%s,0x%03x         %s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF));
+                    snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                    out2(output, pc_curr, "xori", ops, msg);
                 }
                 else if (funct3 == 0b010) { // SLTI
                     x[rd] = ((int32_t)x[rs1] < imm12) ? 1u : 0u;
-                    printf("0x%08x:slti   %s,%s,0x%03x         %s=%u\n",
-                           pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:slti   %s,%s,0x%03x         %s=%u\n",
-                            pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF));
+                    snprintf(msg, sizeof(msg), "%s=%u", rname(rd), x[rd]);
+                    out2(output, pc_curr, "slti", ops, msg);
                 }
                 else if (funct3 == 0b011) { // SLTIU
                     x[rd] = ((uint32_t)x[rs1] < (uint32_t)imm12) ? 1u : 0u;
-                    printf("0x%08x:sltiu  %s,%s,0x%03x         %s=%u\n",
-                           pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:sltiu  %s,%s,0x%03x         %s=%u\n",
-                            pc_curr, rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF), rname(rd), x[rd]);
+                    char ops[32], msg[64];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), (uint32_t)(imm12 & 0xFFF));
+                    snprintf(msg, sizeof(msg), "%s=%u", rname(rd), x[rd]);
+                    out2(output, pc_curr, "sltiu", ops, msg);
                 }
                 else if (funct3 == 0b001) { // SLLI
                     uint32_t shamt = imm12u & 0x1F;
@@ -320,10 +343,11 @@ int main(int argc, char* argv[]) {
                     if (f7 == 0b0000000) {
                         uint32_t before = x[rs1];
                         x[rd] = before << shamt;
-                        printf("0x%08x:slli   %s,%s,%u         %s=0x%08x<<%u=0x%08x\n",
-                               pc_curr, rname(rd), rname(rs1), shamt, rname(rd), before, shamt, x[rd]);
-                        fprintf(output, "0x%08x:slli   %s,%s,%u         %s=0x%08x<<%u=0x%08x\n",
-                                pc_curr, rname(rd), rname(rs1), shamt, rname(rd), before, shamt, x[rd]);
+                        char ops[32], msg[96];
+                        snprintf(ops, sizeof(ops), "%s,%s,%u", rname(rd), rname(rs1), shamt);
+                        snprintf(msg, sizeof(msg), "%s=0x%08x<<%u=0x%08x",
+                                 rname(rd), before, shamt, x[rd]);
+                        out2(output, pc_curr, "slli", ops, msg);
                     } else {
                         printf("0x%08x:error  funct7 inválido em SLLI (0x%02x)\n", pc_curr, f7);
                         fprintf(output, "0x%08x:error  funct7 inválido em SLLI (0x%02x)\n", pc_curr, f7);
@@ -334,17 +358,19 @@ int main(int argc, char* argv[]) {
                     uint32_t shamt = imm12u & 0x1F;
                     uint32_t f7    = (imm12u >> 5) & 0x7F;
                     if (f7 == 0b0000000) { // SRLI
-                        x[rd] = (uint32_t)x[rs1] >> shamt;
-                        printf("0x%08x:srli   %s,%s,%u         %s=0x%08x\n",
-                               pc_curr, rname(rd), rname(rs1), shamt, rname(rd), x[rd]);
-                        fprintf(output, "0x%08x:srli   %s,%s,%u         %s=0x%08x\n",
-                                pc_curr, rname(rd), rname(rs1), shamt, rname(rd), x[rd]);
+                        uint32_t before = x[rs1];
+                        x[rd] = (uint32_t)before >> shamt;
+                        char ops[32], msg[64];
+                        snprintf(ops, sizeof(ops), "%s,%s,%u", rname(rd), rname(rs1), shamt);
+                        snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                        out2(output, pc_curr, "srli", ops, msg);
                     } else if (f7 == 0b0100000) { // SRAI
-                        x[rd] = ((int32_t)x[rs1]) >> shamt;
-                        printf("0x%08x:srai   %s,%s,%u         %s=0x%08x\n",
-                               pc_curr, rname(rd), rname(rs1), shamt, rname(rd), x[rd]);
-                        fprintf(output, "0x%08x:srai   %s,%s,%u         %s=0x%08x\n",
-                                pc_curr, rname(rd), rname(rs1), shamt, rname(rd), x[rd]);
+                        int32_t before = (int32_t)x[rs1];
+                        x[rd] = (uint32_t)(before >> shamt);
+                        char ops[32], msg[64];
+                        snprintf(ops, sizeof(ops), "%s,%s,%u", rname(rd), rname(rs1), shamt);
+                        snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                        out2(output, pc_curr, "srai", ops, msg);
                     } else {
                         printf("0x%08x:error  funct7 inválido em SRLI/SRAI (0x%02x)\n", pc_curr, f7);
                         fprintf(output, "0x%08x:error  funct7 inválido em SRLI/SRAI (0x%02x)\n", pc_curr, f7);
@@ -362,29 +388,29 @@ int main(int argc, char* argv[]) {
             // -------------------- Loads (Tipo I) --------------------
             case 0b0000011: {
                 uint32_t addr = x[rs1] + imm12;
-                uint32_t aidx = addr - BASE_ADDR;
-                if (aidx + 3u >= MEM_SIZE) {
+                if (addr < BASE_ADDR || (addr - BASE_ADDR + 3u) >= MEM_SIZE) {
                     printf("0x%08x:error  load fora de memória (addr=0x%08x)\n", pc_curr, addr);
                     fprintf(output, "0x%08x:error  load fora de memória (addr=0x%08x)\n", pc_curr, addr);
                     running = 0;
                     break;
                 }
+                uint32_t aidx = addr - BASE_ADDR;
 
                 if (funct3 == 0b000) { // LB
                     uint8_t b = mem[aidx];
                     x[rd] = (uint32_t)(int8_t)b;
-                    printf("0x%08x:lb     %s,0x%03x(%s)      %s=0x%08x\n",
-                           pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:lb     %s,0x%03x(%s)      %s=0x%08x\n",
-                            pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%02x", rname(rd), addr, b);
+                    out2(output, pc_curr, "lb", ops, msg);
                 }
                 else if (funct3 == 0b001) { // LH
                     uint16_t h = (uint16_t)mem[aidx] | ((uint16_t)mem[aidx+1] << 8);
                     x[rd] = (uint32_t)(int16_t)h;
-                    printf("0x%08x:lh     %s,0x%03x(%s)      %s=0x%08x\n",
-                           pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:lh     %s,0x%03x(%s)      %s=0x%08x\n",
-                            pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%04x", rname(rd), addr, h);
+                    out2(output, pc_curr, "lh", ops, msg);
                 }
                 else if (funct3 == 0b010) { // LW
                     uint32_t w =  (uint32_t)mem[aidx]
@@ -392,26 +418,26 @@ int main(int argc, char* argv[]) {
                                 | ((uint32_t)mem[aidx+2] << 16)
                                 | ((uint32_t)mem[aidx+3] << 24);
                     x[rd] = w;
-                    printf("0x%08x:lw     %s,0x%03x(%s)      %s=0x%08x\n",
-                           pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:lw     %s,0x%03x(%s)      %s=0x%08x\n",
-                            pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, w);
+                    out2(output, pc_curr, "lw", ops, msg);
                 }
                 else if (funct3 == 0b100) { // LBU
                     uint8_t b = mem[aidx];
                     x[rd] = (uint32_t)b;
-                    printf("0x%08x:lbu    %s,0x%03x(%s)      %s=0x%08x\n",
-                           pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:lbu    %s,0x%03x(%s)      %s=0x%08x\n",
-                            pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%02x", rname(rd), addr, b);
+                    out2(output, pc_curr, "lbu", ops, msg);
                 }
                 else if (funct3 == 0b101) { // LHU
                     uint16_t h = (uint16_t)mem[aidx] | ((uint16_t)mem[aidx+1] << 8);
                     x[rd] = (uint32_t)h;
-                    printf("0x%08x:lhu    %s,0x%03x(%s)      %s=0x%08x\n",
-                           pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
-                    fprintf(output, "0x%08x:lhu    %s,0x%03x(%s)      %s=0x%08x\n",
-                            pc_curr, rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1), rname(rd), x[rd]);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%04x", rname(rd), addr, h);
+                    out2(output, pc_curr, "lhu", ops, msg);
                 }
                 else {
                     printf("0x%08x:error  load desconhecido\n", pc_curr);
@@ -429,29 +455,30 @@ int main(int argc, char* argv[]) {
                 int32_t  immS     = (imm12uS & 0x800) ? (int32_t)(imm12uS | 0xFFFFF000) : (int32_t)imm12uS;
 
                 uint32_t addr = x[rs1] + immS;
-                uint32_t aidx = addr - BASE_ADDR;
-                if (aidx + 3u >= MEM_SIZE) {
+                if (addr < BASE_ADDR || (addr - BASE_ADDR + 3u) >= MEM_SIZE) {
                     printf("0x%08x:error  store fora de memória (addr=0x%08x)\n", pc_curr, addr);
                     fprintf(output, "0x%08x:error  store fora de memória (addr=0x%08x)\n", pc_curr, addr);
                     running = 0;
                     break;
                 }
+                uint32_t aidx = addr - BASE_ADDR;
 
                 if (funct3 == 0b000) { // SB
-                    mem[aidx] = (uint8_t)(x[rs2] & 0xFF);
-                    printf("0x%08x:sb     %s,0x%03x(%s)        mem[0x%08x]=0x%02x\n",
-                           pc_curr, rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1), addr, x[rs2] & 0xFF);
-                    fprintf(output, "0x%08x:sb     %s,0x%03x(%s)        mem[0x%08x]=0x%02x\n",
-                            pc_curr, rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1), addr, x[rs2] & 0xFF);
+                    uint8_t b = (uint8_t)(x[rs2] & 0xFF);
+                    mem[aidx] = b;
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "mem[0x%08x]=0x%02x", addr, b);
+                    out2(output, pc_curr, "sb", ops, msg);
                 }
                 else if (funct3 == 0b001) { // SH
                     uint16_t h = (uint16_t)(x[rs2] & 0xFFFF);
-                    mem[aidx]     = (uint8_t)(h & 0xFF);
-                    mem[aidx + 1] = (uint8_t)((h >> 8) & 0xFF);
-                    printf("0x%08x:sh     %s,0x%03x(%s)        mem[0x%08x]=0x%04x\n",
-                           pc_curr, rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1), addr, h);
-                    fprintf(output, "0x%08x:sh     %s,0x%03x(%s)        mem[0x%08x]=0x%04x\n",
-                            pc_curr, rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1), addr, h);
+                    mem[aidx]     = (uint8_t)( h        & 0xFF);
+                    mem[aidx + 1] = (uint8_t)((h >> 8)  & 0xFF);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "mem[0x%08x]=0x%04x", addr, h);
+                    out2(output, pc_curr, "sh", ops, msg);
                 }
                 else if (funct3 == 0b010) { // SW
                     uint32_t w = x[rs2];
@@ -459,11 +486,10 @@ int main(int argc, char* argv[]) {
                     mem[aidx + 1] = (uint8_t)((w >> 8)  & 0xFF);
                     mem[aidx + 2] = (uint8_t)((w >> 16) & 0xFF);
                     mem[aidx + 3] = (uint8_t)((w >> 24) & 0xFF);
-                    uint32_t immS_disp = (uint32_t)(imm12uS & 0xFFF);
-                    printf("0x%08x:sw     %s,0x%03x(%s)        mem[0x%08x]=0x%08x\n",
-                           pc_curr, rname(rs2), immS_disp, rname(rs1), addr, w);
-                    fprintf(output, "0x%08x:sw     %s,0x%03x(%s)        mem[0x%08x]=0x%08x\n",
-                            pc_curr, rname(rs2), immS_disp, rname(rs1), addr, w);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1));
+                    snprintf(msg, sizeof(msg), "mem[0x%08x]=0x%08x", addr, w);
+                    out2(output, pc_curr, "sw", ops, msg);
                 }
                 else {
                     printf("0x%08x:error  store desconhecido\n", pc_curr);
@@ -486,67 +512,67 @@ int main(int argc, char* argv[]) {
                                   | (imm_4_1  << 1);
                 int32_t  immB   = (imm13u & 0x1000) ? (int32_t)(imm13u | 0xFFFFE000) : (int32_t)imm13u;
                 uint32_t target = pc_curr + immB;
+                uint32_t shown_off = (imm13u >> 1) & 0xFFF;
 
                 if (funct3 == 0b000) { // BEQ
                     int taken = (x[rs1] == x[rs2]);
-                    pc_next = taken ? target : pc_next;
-                    uint32_t shown_off = (imm13u >> 1) & 0xFFF;
                     uint32_t newpc = taken ? target : (pc_curr + 4);
-                    printf("0x%08x:beq    %s,%s,0x%03x         (0x%08x==0x%08x)=%d->pc=0x%08x\n",
-                           pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
-                    fprintf(output, "0x%08x:beq    %s,%s,0x%03x         (0x%08x==0x%08x)=%d->pc=0x%08x\n",
-                            pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
+                    if (taken) pc_next = target;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rs1), rname(rs2), shown_off);
+                    snprintf(msg, sizeof(msg), "(0x%08x==0x%08x)=%d->pc=0x%08x",
+                             x[rs1], x[rs2], taken, newpc);
+                    out2(output, pc_curr, "beq", ops, msg);
                 }
                 else if (funct3 == 0b001) { // BNE
                     int taken = (x[rs1] != x[rs2]);
-                    pc_next = taken ? target : pc_next;
-                    uint32_t shown_off = (imm13u >> 1) & 0xFFF;
                     uint32_t newpc = taken ? target : (pc_curr + 4);
-                    printf("0x%08x:bne    %s,%s,0x%03x         (0x%08x!=0x%08x)=%d->pc=0x%08x\n",
-                           pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
-                    fprintf(output, "0x%08x:bne    %s,%s,0x%03x         (0x%08x!=0x%08x)=%d->pc=0x%08x\n",
-                            pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
+                    if (taken) pc_next = target;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rs1), rname(rs2), shown_off);
+                    snprintf(msg, sizeof(msg), "(0x%08x!=0x%08x)=%d->pc=0x%08x",
+                             x[rs1], x[rs2], taken, newpc);
+                    out2(output, pc_curr, "bne", ops, msg);
                 }
                 else if (funct3 == 0b100) { // BLT
-                    uint32_t shown_off = (imm13u >> 1) & 0xFFF;
                     int taken = ((int32_t)x[rs1] < (int32_t)x[rs2]);
-                    uint32_t lhs = x[rs1], rhs = x[rs2];
-                    uint32_t newpc = taken ? (pc_curr + (int32_t)immB) : (pc_curr + 4);
-                    pc_next = taken ? (pc_curr + (int32_t)immB) : pc_next;
-                    printf("0x%08x:blt    %s,%s,0x%03x         (0x%08x<0x%08x)=%d->pc=0x%08x\n",
-                           pc_curr, rname(rs1), rname(rs2), shown_off, lhs, rhs, taken, newpc);
-                    fprintf(output, "0x%08x:blt    %s,%s,0x%03x         (0x%08x<0x%08x)=%d->pc=0x%08x\n",
-                            pc_curr, rname(rs1), rname(rs2), shown_off, lhs, rhs, taken, newpc);
+                    uint32_t newpc = taken ? target : (pc_curr + 4);
+                    if (taken) pc_next = target;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rs1), rname(rs2), shown_off);
+                    snprintf(msg, sizeof(msg), "(0x%08x<0x%08x)=%d->pc=0x%08x",
+                             x[rs1], x[rs2], taken, newpc);
+                    out2(output, pc_curr, "blt", ops, msg);
                 }
                 else if (funct3 == 0b101) { // BGE
-                    uint32_t shown_off = (imm13u >> 1) & 0xFFF;
                     int taken = ((int32_t)x[rs1] >= (int32_t)x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
-                    pc_next = taken ? target : pc_next;
-                    printf("0x%08x:bge    %s,%s,0x%03x         (0x%08x>=0x%08x)=%d->pc=0x%08x\n",
-                           pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
-                    fprintf(output, "0x%08x:bge    %s,%s,0x%03x         (0x%08x>=0x%08x)=%d->pc=0x%08x\n",
-                            pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
+                    if (taken) pc_next = target;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rs1), rname(rs2), shown_off);
+                    snprintf(msg, sizeof(msg), "(0x%08x>=0x%08x)=%d->pc=0x%08x",
+                             x[rs1], x[rs2], taken, newpc);
+                    out2(output, pc_curr, "bge", ops, msg);
                 }
                 else if (funct3 == 0b110) { // BLTU
-                    uint32_t shown_off = (imm13u >> 1) & 0xFFF;
                     int taken = ((uint32_t)x[rs1] < (uint32_t)x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
-                    pc_next = taken ? target : pc_next;
-                    printf("0x%08x:bltu   %s,%s,0x%03x         (0x%08x<0x%08x)=%d->pc=0x%08x\n",
-                           pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
-                    fprintf(output, "0x%08x:bltu   %s,%s,0x%03x         (0x%08x<0x%08x)=%d->pc=0x%08x\n",
-                            pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
+                    if (taken) pc_next = target;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rs1), rname(rs2), shown_off);
+                    snprintf(msg, sizeof(msg), "(0x%08x<0x%08x)=%d->pc=0x%08x",
+                             x[rs1], x[rs2], taken, newpc);
+                    out2(output, pc_curr, "bltu", ops, msg);
                 }
                 else if (funct3 == 0b111) { // BGEU
-                    uint32_t shown_off = (imm13u >> 1) & 0xFFF;
                     int taken = ((uint32_t)x[rs1] >= (uint32_t)x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
-                    pc_next = taken ? target : pc_next;
-                    printf("0x%08x:bgeu   %s,%s,0x%03x         (0x%08x>=0x%08x)=%d->pc=0x%08x\n",
-                           pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
-                    fprintf(output, "0x%08x:bgeu   %s,%s,0x%03x         (0x%08x>=0x%08x)=%d->pc=0x%08x\n",
-                            pc_curr, rname(rs1), rname(rs2), shown_off, x[rs1], x[rs2], taken, newpc);
+                    if (taken) pc_next = target;
+                    char ops[32], msg[128];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rs1), rname(rs2), shown_off);
+                    snprintf(msg, sizeof(msg), "(0x%08x>=0x%08x)=%d->pc=0x%08x",
+                             x[rs1], x[rs2], taken, newpc);
+                    out2(output, pc_curr, "bgeu", ops, msg);
                 }
                 else {
                     printf("0x%08x:error  branch desconhecido\n", pc_curr);
@@ -556,19 +582,20 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            // -------------------- JALR (Tipo I, controle de fluxo) --------------------
+            // -------------------- JALR (Tipo I) --------------------
             case 0b1100111: {
                 if (funct3 == 0b000) {
                     uint32_t rs1_before = x[rs1];
                     uint32_t ret = pc_curr + 4;
                     uint32_t target = (rs1_before + imm12) & ~1u;
                     x[rd] = ret;
-                    pc_next = target;
+                    char ops[32], msg[128];
                     uint32_t imm12z = (uint32_t)(imm12 & 0xFFF);
-                    printf("0x%08x:jalr   %s,%s,0x%03x       pc=0x%08x+0x%08x,%s=0x%08x\n",
-                           pc_curr, rname(rd), rname(rs1), imm12z, rs1_before, (uint32_t)imm12, rname(rd), ret);
-                    fprintf(output, "0x%08x:jalr   %s,%s,0x%03x       pc=0x%08x+0x%08x,%s=0x%08x\n",
-                            pc_curr, rname(rd), rname(rs1), imm12z, rs1_before, (uint32_t)imm12, rname(rd), ret);
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%03x", rname(rd), rname(rs1), imm12z);
+                    snprintf(msg, sizeof(msg), "pc=0x%08x+0x%08x,%s=0x%08x",
+                             rs1_before, (uint32_t)imm12, rname(rd), ret);
+                    out2(output, pc_curr, "jalr", ops, msg);
+                    pc_next = target;
                 } else {
                     printf("0x%08x:error  jalr funct3!=000\n", pc_curr);
                     fprintf(output, "0x%08x:error  jalr funct3!=000\n", pc_curr);
@@ -590,13 +617,13 @@ int main(int argc, char* argv[]) {
                 uint32_t ret = pc_curr + 4;
                 uint32_t target = pc_curr + immJ;
                 x[rd] = ret;
-                pc_next = target;
 
-                uint32_t shown = (imm21u >> 1) & 0xfffff; // sem bit0
-                printf("0x%08x:jal    %s,0x%05x        pc=0x%08x,%s=0x%08x\n",
-                       pc_curr, rname(rd), shown, target, rname(rd), ret);
-                fprintf(output, "0x%08x:jal    %s,0x%05x        pc=0x%08x,%s=0x%08x\n",
-                        pc_curr, rname(rd), shown, target, rname(rd), ret);
+                char ops[32], msg[96];
+                snprintf(ops, sizeof(ops), "%s,0x%05x", rname(rd), (imm21u >> 1) & 0xfffff);
+                snprintf(msg, sizeof(msg), "pc=0x%08x,%s=0x%08x", target, rname(rd), ret);
+                out2(output, pc_curr, "jal", ops, msg);
+
+                pc_next = target;
                 break;
             }
 
@@ -604,10 +631,10 @@ int main(int argc, char* argv[]) {
             case 0b0110111: {
                 uint32_t imm20 = instruction & 0xFFFFF000;
                 x[rd] = imm20;
-                printf("0x%08x:lui    %s,0x%05x          %s=0x%08x\n",
-                       pc_curr, rname(rd), (imm20 >> 12), rname(rd), x[rd]);
-                fprintf(output, "0x%08x:lui    %s,0x%05x          %s=0x%08x\n",
-                        pc_curr, rname(rd), (imm20 >> 12), rname(rd), x[rd]);
+                char ops[32], msg[64];
+                snprintf(ops, sizeof(ops), "%s,0x%05x", rname(rd), (imm20 >> 12));
+                snprintf(msg, sizeof(msg), "%s=0x%08x", rname(rd), x[rd]);
+                out2(output, pc_curr, "lui", ops, msg);
                 break;
             }
 
@@ -615,23 +642,22 @@ int main(int argc, char* argv[]) {
             case 0b0010111: {
                 uint32_t imm20 = instruction & 0xFFFFF000;
                 x[rd] = pc_curr + imm20;
-                printf("0x%08x:auipc  %s,0x%05x          %s=0x%08x+0x%08x=0x%08x\n",
-                       pc_curr, rname(rd), (imm20 >> 12), rname(rd), pc_curr, imm20, x[rd]);
-                fprintf(output, "0x%08x:auipc  %s,0x%05x          %s=0x%08x+0x%08x=0x%08x\n",
-                        pc_curr, rname(rd), (imm20 >> 12), rname(rd), pc_curr, imm20, x[rd]);
+                char ops[32], msg[96];
+                snprintf(ops, sizeof(ops), "%s,0x%05x", rname(rd), (imm20 >> 12));
+                snprintf(msg, sizeof(msg), "%s=0x%08x+0x%08x=0x%08x",
+                         rname(rd), pc_curr, imm20, x[rd]);
+                out2(output, pc_curr, "auipc", ops, msg);
                 break;
             }
 
-            // -------------------- System: ECALL / EBREAK --------------------
+            // -------------------- System (ECALL / EBREAK) --------------------
             case 0b1110011: {
                 uint32_t imm_sys = instruction >> 20;
                 if (funct3 == 0b000 && imm_sys == 0x001) { // EBREAK
-                    printf("0x%08x:ebreak\n", pc_curr);
-                    fprintf(output, "0x%08x:ebreak\n", pc_curr);
+                    out2(output, pc_curr, "ebreak", "", "");
                     running = 0;
-                } else if (funct3 == 0b000 && imm_sys == 0x000) { // ECALL
-                    printf("0x%08x:ecall\n", pc_curr);
-                    fprintf(output, "0x%08x:ecall\n", pc_curr);
+                } else if (funct3 == 0b000 && imm_sys == 0x000) { // ECALL (opcional)
+                    out2(output, pc_curr, "ecall", "", "");
                 } else {
                     printf("0x%08x:error  system desconhecido\n", pc_curr);
                     fprintf(output, "0x%08x:error  system desconhecido\n", pc_curr);
