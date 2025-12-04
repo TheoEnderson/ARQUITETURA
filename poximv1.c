@@ -17,7 +17,6 @@ static inline const char* rname(int r) {
     return x_label[r & 31];
 }
 
-// imprime só no arquivo (sem stdout)
 static void out2(FILE* output,
                  uint32_t pc, const char* mnem,
                  const char* ops, const char* msg)
@@ -629,7 +628,7 @@ int main(int argc, char* argv[]) {
                 if (funct3 == 0b000 && imm_sys == 0x001) { // EBREAK
                     out2(output, pc_curr, "ebreak", "", "");
                     running = 0;
-                } else if (funct3 == 0b000 && imm_sys == 0x000) { // ECALL (opcional)
+                } else if (funct3 == 0b000 && imm_sys == 0x000) { // ECALL 
                     out2(output, pc_curr, "ecall", "", "");
                 } else {
                     fprintf(output, "0x%08x:error  system desconhecido\n", pc_curr);
