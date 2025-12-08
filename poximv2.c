@@ -12,6 +12,95 @@
 #define IO_KBD_ADDR   0x10000000u  // teclado
 #define IO_TTY_ADDR   0x10000002u  // tela
 
+// CSRs básicos (modo máquina)
+static uint32_t csr_mstatus = 0;
+static uint32_t csr_mtvec   = 0;
+static uint32_t csr_mepc    = 0;
+static uint32_t csr_mcause  = 0;
+static uint32_t csr_mtval   = 0;
+
+enum {
+    EXC_INST_FAULT       = 1,
+    EXC_ILLEGAL_INST     = 2,
+    EXC_LOAD_FAULT       = 5,
+    EXC_STORE_FAULT      = 7,
+    EXC_ENV_CALL_M       = 11,
+};
+
+static uint32_t csr_read(uint32_t addr) {
+    switch (addr) {
+        case 0x300: return csr_mstatus; // mstatus
+        case 0x305: return csr_mtvec;   // mtvec
+        case 0x341: return csr_mepc;    // mepc
+        case 0x342: return csr_mcause;  // mcause
+        case 0x343: return csr_mtval;   // mtval
+        default:    return 0;           // CSR não implementado -> 0
+    }
+}
+
+static void csr_write(uint32_t addr, uint32_t val) {
+    switch (addr) {
+        case 0x300: csr_mstatus = val; break;
+        case 0x305: csr_mtvec   = val; break;
+        case 0x341: csr_mepc    = val; break;
+        case 0x342: csr_mcause  = val; break;
+        case 0x343: csr_mtval   = val; break;
+        default: /* ignora */  break;
+    }
+}
+
+static const char* csr_name(uint32_t addr) {
+    switch (addr) {
+        case 0x300: return "mstatus";
+        case 0x305: return "mtvec";
+        case 0x341: return "mepc";
+        case 0x342: return "mcause";
+        case 0x343: return "mtval";
+        default:    return NULL;  // se não conhecer, volta NULL
+    }
+}
+
+static void raise_exception(uint32_t cause,
+                            uint32_t epc,
+                            uint32_t tval,
+                            uint32_t *pc_next,
+                            FILE *output)
+{
+    // Nome da exceção igual ao do arquivo de referência
+    const char *name = "unknown";
+    switch (cause) {
+        case EXC_INST_FAULT:   name = "instruction_fault";   break;
+        case EXC_ILLEGAL_INST: name = "illegal_instruction"; break;
+        case EXC_LOAD_FAULT:   name = "load_fault";          break;
+        case EXC_STORE_FAULT:  name = "store_fault";         break;
+        case EXC_ENV_CALL_M:   name = "environment_call";    break;
+    }
+
+    // Atualiza CSRs
+    csr_mcause = cause;
+    csr_mepc   = epc;
+    csr_mtval  = tval;
+
+    // Atualiza mstatus conforme trap de modo máquina
+    // MIE (bit 3), MPIE (bit 7), MPP (bits 12–11)
+    uint32_t m = csr_mstatus;
+    uint32_t mie  = (m >> 3) & 1u;
+
+    m &= ~((1u << 3) | (1u << 7) | (3u << 11)); // zera MIE, MPIE, MPP
+    m |= (mie << 7);        // MPIE <- MIE antigo
+    m |= (3u  << 11);       // MPP  <- 3 (modo máquina)
+
+    csr_mstatus = m;
+
+    // PC aponta para mtvec (trap handler)
+    *pc_next = csr_mtvec;
+
+    // Imprime linha de exceção
+    fprintf(output,
+        ">exception:%-26s cause=0x%08x,epc=0x%08x,tval=0x%08x\n",
+        name, cause, epc, tval);
+}
+
 static inline const char* rname(int r) {
     static const char* x_label[32] = {
         "zero","ra","sp","gp","tp","t0","t1","t2",
@@ -26,7 +115,7 @@ static void out2(FILE* output,
                  uint32_t pc, const char* mnem,
                  const char* ops, const char* msg)
 {
-    fprintf(output, "0x%08x:%-6s %-18s %s\n", pc, mnem, ops, msg );
+    fprintf(output, "0x%08x:%-6s %-19s %s\n", pc, mnem, ops, msg );
 }
 
 // Leitura de 8 bits (byte) em endereço de memória ou IO
@@ -161,10 +250,13 @@ int main(int argc, char* argv[]) {
     uint8_t running = 1;
     while (running) {
         int ok = 1;
+        uint32_t pc_curr = pc;
+        uint32_t pc_next = pc + 4;
+
         uint32_t instruction = mem_read32(pc, mem, &ok);
         if (!ok) {
-            fprintf(output, "0x%08x:error  fetch em endereço inválido\n", pc);
-            break;
+            raise_exception(EXC_INST_FAULT, pc_curr, 0, &pc_next, output);
+            goto end_of_loop;
         }
 
         uint8_t  opcode =  instruction & 0x7F;
@@ -177,8 +269,6 @@ int main(int argc, char* argv[]) {
         uint32_t imm12u = instruction >> 20;
         int32_t  imm12  = (imm12u & 0x800) ? (int32_t)(imm12u | 0xFFFFF000) : (int32_t)imm12u;
 
-        uint32_t pc_curr = pc;
-        uint32_t pc_next = pc + 4;
 
         switch (opcode) {
 
@@ -351,8 +441,10 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "remu", ops, msg);
                 }
                 else {
-                    fprintf(output, "0x%08x:error  R-type desconhecido\n", pc_curr);
-                    running = 0;
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
                 }
                 break;
             }
@@ -421,8 +513,10 @@ int main(int argc, char* argv[]) {
                         snprintf(msg, sizeof(msg), "%s=0x%08x<<%u=0x%08x", rname(rd), before, shamt, x[rd]);
                         out2(output, pc_curr, "slli", ops, msg);
                     } else {
-                        fprintf(output, "0x%08x:error  funct7 inválido em SLLI (0x%02x)\n", pc_curr, f7);
-                        running = 0;
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
                     }
                 }
                 else if (funct3 == 0b101) { // SRLI / SRAI
@@ -443,13 +537,17 @@ int main(int argc, char* argv[]) {
                         snprintf(msg, sizeof(msg), "%s=0x%08x>>%u=0x%08x", rname(rd), (uint32_t)before, shamt, x[rd]);
                         out2(output, pc_curr, "srai", ops, msg);
                     } else {
-                        fprintf(output, "0x%08x:error  funct7 inválido em SRLI/SRAI (0x%02x)\n", pc_curr, f7);
-                        running = 0;
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
                     }
                 }
                 else {
-                    fprintf(output, "0x%08x:error  I-type ALU desconhecido\n", pc_curr);
-                    running = 0;
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
                 }
                 break;
             }
@@ -462,9 +560,8 @@ int main(int argc, char* argv[]) {
                 if (funct3 == 0b000) { // LB (sign-extend)
                     uint8_t b = mem_read8(addr, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  lb em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output);
+                        goto end_of_loop;  // ou um flag pra pular o "pc = pc_next" padrão
                     }
                     x[rd] = (uint32_t)(int8_t)b;
                     char ops[32], msg[128];
@@ -475,9 +572,8 @@ int main(int argc, char* argv[]) {
                 else if (funct3 == 0b001) { // LH (sign-extend)
                     uint16_t h = mem_read16(addr, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  lh em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output);
+                        goto end_of_loop;  // ou um flag pra pular o "pc = pc_next" padrão
                     }
                     x[rd] = (uint32_t)(int16_t)h;
                     char ops[32], msg[128];
@@ -488,9 +584,8 @@ int main(int argc, char* argv[]) {
                 else if (funct3 == 0b010) { // LW
                     uint32_t w = mem_read32(addr, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  lw em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output);
+                        goto end_of_loop;  // ou um flag pra pular o "pc = pc_next" padrão
                     }
                     x[rd] = w;
                     char ops[32], msg[128];
@@ -501,9 +596,8 @@ int main(int argc, char* argv[]) {
                 else if (funct3 == 0b100) { // LBU (zero-extend)
                     uint8_t b = mem_read8(addr, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  lbu em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output);
+                        goto end_of_loop;  // ou um flag pra pular o "pc = pc_next" padrão
                     }
                     x[rd] = (uint32_t)b;
                     char ops[32], msg[128];
@@ -514,9 +608,8 @@ int main(int argc, char* argv[]) {
                 else if (funct3 == 0b101) { // LHU (zero-extend)
                     uint16_t h = mem_read16(addr, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  lhu em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output);
+                        goto end_of_loop;  // ou um flag pra pular o "pc = pc_next" padrão
                     }
                     x[rd] = (uint32_t)h;
                     char ops[32], msg[128];
@@ -525,8 +618,10 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "lhu", ops, msg);
                 }
                 else {
-                    fprintf(output, "0x%08x:error  load desconhecido\n", pc_curr);
-                    running = 0;
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
                 }
                 break;
             }
@@ -545,9 +640,10 @@ int main(int argc, char* argv[]) {
                     uint8_t b = (uint8_t)(x[rs2] & 0xFF);
                     mem_write8(addr, b, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  sb em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
                     }
                     char ops[32], msg[96];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1));
@@ -558,9 +654,10 @@ int main(int argc, char* argv[]) {
                     uint16_t h = (uint16_t)(x[rs2] & 0xFFFF);
                     mem_write16(addr, h, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  sh em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
                     }
                     char ops[32], msg[96];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1));
@@ -571,9 +668,10 @@ int main(int argc, char* argv[]) {
                     uint32_t w = x[rs2];
                     mem_write32(addr, w, mem, &ok);
                     if (!ok) {
-                        fprintf(output, "0x%08x:error  sw em endereço inválido (addr=0x%08x)\n", pc_curr, addr);
-                        running = 0;
-                        break;
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
                     }
                     char ops[32], msg[96];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rs2), (uint32_t)(imm12uS & 0xFFF), rname(rs1));
@@ -581,8 +679,10 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "sw", ops, msg);
                 }
                 else {
-                    fprintf(output, "0x%08x:error  store desconhecido\n", pc_curr);
-                    running = 0;
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
                 }
                 break;
             }
@@ -663,8 +763,10 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "bgeu", ops, msg);
                 }
                 else {
-                    fprintf(output, "0x%08x:error  branch desconhecido\n", pc_curr);
-                    running = 0;
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
                 }
                 break;
             }
@@ -684,8 +786,10 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "jalr", ops, msg);
                     pc_next = target;
                 } else {
-                    fprintf(output, "0x%08x:error  jalr funct3!=000\n", pc_curr);
-                    running = 0;
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
                 }
                 break;
             }
@@ -739,24 +843,113 @@ int main(int argc, char* argv[]) {
             // -------------------- System (ECALL / EBREAK) --------------------
             case 0b1110011: {
                 uint32_t imm_sys = instruction >> 20;
-                if (funct3 == 0b000 && imm_sys == 0x001) { // EBREAK
-                    out2(output, pc_curr, "ebreak", "", "");
-                    running = 0;
-                } else if (funct3 == 0b000 && imm_sys == 0x000) { // ECALL 
-                    out2(output, pc_curr, "ecall", "", "");
-                } else {
-                    fprintf(output, "0x%08x:error  system desconhecido\n", pc_curr);
-                    running = 0;
+
+                if (funct3 == 0b000) {
+                    // ECALL / EBREAK / MRET (SYSTEM "imediato")
+                    if (imm_sys == 0x000) {          // ECALL
+                        out2(output, pc_curr, "ecall", "", "");
+                        uint32_t pc_next_exc = pc_curr + 4;
+                        // environment_call from M-mode
+                        raise_exception(EXC_ENV_CALL_M, pc_curr, 0, &pc_next_exc, output);
+                        pc_next = pc_next_exc;
+                    }
+                    else if (imm_sys == 0x001) {     // EBREAK
+                        out2(output, pc_curr, "ebreak", "", "");
+                        running = 0;
+                    }
+                    else if (imm_sys == 0x302) {     // MRET
+                        // Sem ops na saída
+                        char msg[64];
+                        // PC de retorno é mepc
+                        pc_next = csr_mepc;
+
+                        // Atualiza mstatus conforme mret
+                        uint32_t m = csr_mstatus;
+                        uint32_t mpie = (m >> 7) & 1u;
+                        // MIE <- MPIE; MPIE <- 1; MPP <- 0
+                        m &= ~((1u << 3) | (1u << 7) | (3u << 11));
+                        m |= (mpie << 3);
+                        m |= (1u << 7);
+                        csr_mstatus = m;
+
+                        snprintf(msg, sizeof(msg), "pc=0x%08x", pc_next);
+                        out2(output, pc_curr, "mret", "", msg);
+                    }
+                    else {
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
+                    }
+                }
+                else {
+                    // Instruções CSR registrador-registrador
+                    uint32_t csr_addr = instruction >> 20;
+                    uint32_t old = csr_read(csr_addr);
+
+                    const char *csrnm = csr_name(csr_addr);
+                    char csrbuf[16];
+                    if (!csrnm) {
+                        snprintf(csrbuf, sizeof(csrbuf), "0x%03x", csr_addr);
+                        csrnm = csrbuf;
+                    }
+
+                    if (funct3 == 0b001) { // CSRRW
+                        uint32_t rs1_val = x[rs1];
+                        if (rd != 0) x[rd] = old;
+                        csr_write(csr_addr, rs1_val);
+
+                        char ops[32], msg[96];
+                        // esperado: csrrw  zero,mtvec,t0
+                        snprintf(ops, sizeof(ops), "%s,%s,%s",
+                                rname(rd), csrnm, rname(rs1));
+                        // esperado: zero=mtvec=0x00000000,mtvec=t0=0x80000004
+                        snprintf(msg, sizeof(msg), "%s=%s=0x%08x,%s=%s=0x%08x",
+                                rname(rd), csrnm, old,
+                                csrnm, rname(rs1), rs1_val);
+
+                        out2(output, pc_curr, "csrrw", ops, msg);
+                    }
+                    else if (funct3 == 0b010) { // CSRRS
+                        uint32_t rs1_val = x[rs1];
+                        uint32_t new_csr = old;
+                        if (rs1 != 0) {
+                            new_csr = old | rs1_val;
+                            csr_write(csr_addr, new_csr);
+                        }
+                        if (rd != 0) x[rd] = old;
+
+                        char ops[32], msg[160];
+                        // esperado: csrrs  a0,mcause,zero
+                        snprintf(ops, sizeof(ops), "%s,%s,%s",
+                                rname(rd), csrnm, rname(rs1));
+
+                        // esperado: a0=mcause=0x...,mcause|=zero=0x...|0x...=0x...
+                        snprintf(msg, sizeof(msg),
+                                "%s=%s=0x%08x,%s|=%s=0x%08x|0x%08x=0x%08x",
+                                rname(rd), csrnm, old,
+                                csrnm, rname(rs1), old, rs1_val, new_csr);
+
+                        out2(output, pc_curr, "csrrs", ops, msg);
+                    }
+                    else {
+                        uint32_t pc_exc = pc_curr + 4;
+                        raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                        pc_next = pc_exc;
+                        goto end_of_loop;
+                    }
                 }
                 break;
             }
 
-            default:
-                fprintf(output, "0x%08x:error  opcode desconhecido (0x%02x)\n", pc_curr, opcode);
-                running = 0;
-                break;
+            default: {
+                uint32_t pc_exc = pc_curr + 4;
+                raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
+                pc_next = pc_exc;   // quem vale é este
+                goto end_of_loop;
+            }
         }
-
+        end_of_loop:
         // x0 sempre zero (estado arquitetural)
         x[0] = 0;
         pc = pc_next;
