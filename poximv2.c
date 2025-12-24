@@ -4,6 +4,10 @@
 #include <string.h>
 #include <limits.h>
 
+// ---------------------------------------------------------------------------
+// DEFINIÇÕES E CONSTANTES
+// ---------------------------------------------------------------------------
+
 // RAM
 #define RAM_BASE   0x80000000u
 #define RAM_SIZE   (32u * 1024u)
@@ -11,16 +15,20 @@
 // MMIO (usado pelo teste)
 #define IO_UART_BASE  0x10000000u   // 0: data, 1: config, 2: dummy-read=1, 5: status
 #define IO_TTY_ADDR   0x10000002u
-#define IO_SWI_ADDR   0x02000000u   // software interrupt (MSIP fake)
+#define IO_SWI_ADDR   0x02000000u   // gera interrupção externa via PLIC no teste
 
 // CLINT fake: mtimecmp (low/high)
 #define CLINT_MTIMECMP_LO 0x02004000u
 #define CLINT_MTIMECMP_HI 0x02004004u
 
+#define CLINT_MTIME_LO    0x0200BFF8u
+#define CLINT_MTIME_HI    0x0200BFFCu
+
 // PLIC fake (endereços tocados pelo programa do teste)
 #define PLIC_ENABLE_ADDR   0x0c002000u
 #define PLIC_THRESHOLD     0x0c200000u
 #define PLIC_CLAIMCOMP     0x0c200004u
+#define PLIC_PRIORITY_10   0x0c000028u
 
 // CSRs (modo máquina)
 static uint32_t csr_mstatus = 0;
@@ -36,35 +44,22 @@ static uint64_t mtime    = 0;
 static uint64_t mtimecmp = UINT64_MAX;  // começa desarmado
 
 // Pendências
-static int soft_irq_pending = 0;
+static int soft_irq_pending  = 0;
 static int timer_irq_pending = 0;
-static int uart_irq_pending = 0;
-
-// PLIC simplificado
-static uint32_t plic_enable = 0;
-static uint32_t plic_claim_id = 10;     // teste espera 0x0a
 
 // UART FIFO (loopback)
 static uint8_t  uart_fifo[4096];
 static uint32_t uart_head = 0, uart_tail = 0;
 
-static inline int uart_fifo_empty(void) { return uart_head == uart_tail; }
-static inline int uart_fifo_full(void)  { return ((uart_tail + 1) % sizeof(uart_fifo)) == uart_head; }
+// PLIC (estado interno)
+static uint32_t plic_priority_10 = 0;  // escrito em 0x0c000028
+static uint32_t plic_enable      = 0;  // bitmap, bit 10 habilita a fonte 10
+static uint32_t plic_threshold   = 0;  // geralmente 0
 
-static inline void uart_fifo_push(uint8_t v) {
-    if (!uart_fifo_full()) {
-        uart_fifo[uart_tail] = v;
-        uart_tail = (uart_tail + 1) % sizeof(uart_fifo);
-    }
-}
+static int plic_irq10_pending = 0;     // pendência da fonte 10 (do teste)
+static int uart_irq_pending = 0;       // Fonte externa via UART (opcional)
 
-static inline uint8_t uart_fifo_pop(void) {
-    if (uart_fifo_empty()) return 0;
-    uint8_t v = uart_fifo[uart_head];
-    uart_head = (uart_head + 1) % sizeof(uart_fifo);
-    return v;
-}
-
+// Códigos de Exceção
 enum {
     EXC_INST_FAULT       = 1,
     EXC_ILLEGAL_INST     = 2,
@@ -72,6 +67,33 @@ enum {
     EXC_STORE_FAULT      = 7,
     EXC_ENV_CALL_M       = 11,
 };
+
+// ---------------------------------------------------------------------------
+// FUNÇÕES AUXILIARES UART (FIFO)
+// ---------------------------------------------------------------------------
+
+static int uart_fifo_empty(void) {
+    return (uart_head == uart_tail);
+}
+
+static void uart_fifo_push(uint8_t val) {
+    uint32_t next = (uart_head + 1) % 4096;
+    if (next != uart_tail) {
+        uart_fifo[uart_head] = val;
+        uart_head = next;
+    }
+}
+
+static uint8_t uart_fifo_pop(void) {
+    if (uart_head == uart_tail) return 0;
+    uint8_t val = uart_fifo[uart_tail];
+    uart_tail = (uart_tail + 1) % 4096;
+    return val;
+}
+
+// ---------------------------------------------------------------------------
+// CSRs e EXCEÇÕES
+// ---------------------------------------------------------------------------
 
 static uint32_t csr_read(uint32_t addr) {
     switch (addr) {
@@ -202,9 +224,17 @@ static void out2(FILE* output,
                  uint32_t pc, const char* mnem,
                  const char* ops, const char* msg)
 {
-    fprintf(output, "0x%08x:%-6s %-19s %s\n", pc, mnem, ops, msg);
+    int ops_empty = (!ops || ops[0] == '\0');
+    int msg_empty = (!msg || msg[0] == '\0');
+
+    if (ops_empty && msg_empty) {
+        fprintf(output, "0x%08x:%s\n", pc, mnem);
+    } else {
+        fprintf(output, "0x%08x:%-6s %-19s %s\n", pc, mnem, ops, msg);
+    }
     fflush(output);
 }
+
 
 // -------------------- Memória / MMIO --------------------
 
@@ -241,18 +271,38 @@ static uint16_t mem_read16(uint32_t addr, uint8_t *mem, int *ok) {
 }
 
 static uint32_t mem_read32(uint32_t addr, uint8_t *mem, int *ok) {
+    // CLINT mtime (64-bit em duas words)
+    if (addr == CLINT_MTIME_LO) return (uint32_t)(mtime & 0xFFFFFFFFu);
+    if (addr == CLINT_MTIME_HI) return (uint32_t)(mtime >> 32);
+
     // mtimecmp (se o programa ler)
     if (addr == CLINT_MTIMECMP_LO) return (uint32_t)(mtimecmp & 0xFFFFFFFFu);
     if (addr == CLINT_MTIMECMP_HI) return (uint32_t)(mtimecmp >> 32);
 
-    // PLIC (reads que aparecem no teste)
+    // ---------- PLIC (reads) ----------
     if (addr == PLIC_CLAIMCOMP) {
-        return uart_irq_pending ? plic_claim_id : 0u;
-    }
-    if (addr == PLIC_THRESHOLD) {
+        int enabled10 = (plic_enable & (1u << 10)) != 0;
+        int above_th  = (plic_priority_10 > plic_threshold);
+
+        if (plic_irq10_pending && enabled10 && above_th) {
+            return 10u; // claim ID 10
+        }
         return 0u;
     }
-    if (addr == 0x0c001000u || addr == 0x0c000028u) {
+
+    if (addr == PLIC_THRESHOLD) {
+        return plic_threshold;
+    }
+
+    if (addr == PLIC_PRIORITY_10) {
+        return plic_priority_10;
+    }
+
+    if (addr == PLIC_ENABLE_ADDR) {
+        return plic_enable;
+    }
+
+    if (addr == 0x0c001000u) {
         return 0u;
     }
 
@@ -271,21 +321,15 @@ static void mem_write8(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
         return;
     }
 
-    // UART TX: imprime + loopback no FIFO; se PLIC enable, pendura external IRQ
+    // UART TX
     if (addr == IO_UART_BASE + 0) {
         fputc((int)value, stdout);
         fflush(stdout);
-
         uart_fifo_push(value);
-
-        if ((plic_enable & 0x00000400u) != 0) {
-            uart_irq_pending = 1;
-            csr_mip |= (1u << 11); // MEIP
-        }
         return;
     }
 
-    // UART config (teste faz sb aqui)
+    // UART config
     if (addr == IO_UART_BASE + 1) {
         return;
     }
@@ -297,12 +341,20 @@ static void mem_write8(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
         return;
     }
 
-    // Software interrupt (MSIP fake)
+    // Software interrupt (MSIP fake) -> Gera External Interrupt
     if (addr >= IO_SWI_ADDR && addr < IO_SWI_ADDR + 4) {
         if (value != 0) {
-            soft_irq_pending = 1;
-            csr_mip |= (1u << 3); // MSIP (bit 3) por consistência
+            plic_irq10_pending = 1;
+            csr_mip |= (1u << 11);       // MEIP
+        } else {
+            plic_irq10_pending = 0;
+            if (!uart_irq_pending) csr_mip &= ~(1u << 11);
         }
+        return;
+    }
+
+    // CLINT mtime (ignora escrita)
+    if (addr >= CLINT_MTIME_LO && addr < (CLINT_MTIME_HI + 4u)) {
         return;
     }
 
@@ -317,6 +369,11 @@ static void mem_write16(uint32_t addr, uint16_t value, uint8_t *mem, int *ok) {
 
 static void mem_write32(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
 {
+    // CLINT mtime (ignora escrita)
+    if (addr == CLINT_MTIME_LO || addr == CLINT_MTIME_HI) {
+        return;
+    }
+
     // mtimecmp low/high
     if (addr == CLINT_MTIMECMP_LO) {
         mtimecmp = (mtimecmp & 0xFFFFFFFF00000000ULL) | (uint64_t)value;
@@ -329,33 +386,43 @@ static void mem_write32(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
         return;
     }
 
-    // PLIC enable (teste escreve 0x400)
+    // ---------- PLIC (writes) ----------
+    if (addr == PLIC_PRIORITY_10) {
+        plic_priority_10 = value;
+        return;
+    }
+
     if (addr == PLIC_ENABLE_ADDR) {
         plic_enable = value;
         return;
     }
 
-    // PLIC claim/complete
+    if (addr == PLIC_THRESHOLD) {
+        plic_threshold = value;
+        return;
+    }
+
     if (addr == PLIC_CLAIMCOMP) {
-        if (value == plic_claim_id) {
-            uart_irq_pending = 0;
-            csr_mip &= ~(1u << 11); // limpa MEIP
+        // COMPLETE: quando escrever o ID, considera atendida a interrupção
+        if (value == 10u) {
+            plic_irq10_pending = 0;
+            // se NÃO tiver mais nada externo pendente, limpa MEIP
+            if (!uart_irq_pending) {
+                csr_mip &= ~(1u << 11);
+            }
         }
         return;
     }
 
-    // aceita escrita sem fault
-    if (addr == 0x0c000028u) {
-        return;
-    }
-
+    // fallback: escreve byte a byte
     mem_write8(addr,     (uint8_t)( value        & 0xFF), mem, ok); if (!*ok) return;
     mem_write8(addr + 1, (uint8_t)((value >> 8)  & 0xFF), mem, ok); if (!*ok) return;
     mem_write8(addr + 2, (uint8_t)((value >> 16) & 0xFF), mem, ok); if (!*ok) return;
     mem_write8(addr + 3, (uint8_t)((value >> 24) & 0xFF), mem, ok);
 }
 
-// -------------------- CPU --------------------
+
+// -------------------- CPU / MAIN --------------------
 
 int main(int argc, char* argv[]) {
     if (argc < 3) return 1;
@@ -384,7 +451,7 @@ int main(int argc, char* argv[]) {
     const char *banner = "Poxim-V serially says: ";
     for (const char *p = banner; *p; ++p) uart_fifo_push((uint8_t)*p);
 
-    // Loader: formato do .hex de bruninho
+    // Loader: formato do .hex
     {
         uint32_t load_addr = 0;
         char line[4096];
@@ -441,7 +508,7 @@ int main(int argc, char* argv[]) {
 
         switch (opcode) {
 
-            // -------- R-type (inclui extensão M) --------
+            // -------- R-type --------
             case 0b0110011: {
                 if (funct7 == 0b0000000 && funct3 == 0b000) { // ADD
                     uint32_t a = x[rs1], b = x[rs2];
@@ -507,7 +574,7 @@ int main(int argc, char* argv[]) {
                     x[rd] = (uint32_t)(before >> sh);
                     char ops[32], msg[96];
                     snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), rname(rs1), rname(rs2));
-                    snprintf(msg, sizeof(msg), "%s=0x%08x>>%u=0x%08x", rname(rd), (uint32_t)before, sh, x[rd]);
+                    snprintf(msg, sizeof(msg), "%s=0x%08x>>>%u=0x%08x", rname(rd), (uint32_t)before, sh, x[rd]);
                     out2(output, pc_curr, "sra", ops, msg);
                 }
                 else if (funct7 == 0b0000000 && funct3 == 0b010) { // SLT
@@ -620,7 +687,7 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            // -------- I-type (ALU imediato) --------
+            // -------- I-type --------
             case 0b0010011: {
                 if (funct3 == 0b000) { // ADDI
                     uint32_t before = x[rs1];
@@ -705,7 +772,7 @@ int main(int argc, char* argv[]) {
                         x[rd] = (uint32_t)(before >> shamt);
                         char ops[32], msg[128];
                         snprintf(ops, sizeof(ops), "%s,%s,%u", rname(rd), rname(rs1), shamt);
-                        snprintf(msg, sizeof(msg), "%s=0x%08x>>%u=0x%08x", rname(rd), (uint32_t)before, shamt, x[rd]);
+                        snprintf(msg, sizeof(msg), "%s=0x%08x>>>%u=0x%08x", rname(rd), (uint32_t)before, shamt, x[rd]);
                         out2(output, pc_curr, "srai", ops, msg);
                     } else {
                         uint32_t pc_exc = pc_curr + 4;
@@ -729,18 +796,18 @@ int main(int argc, char* argv[]) {
                 int ok2 = 1;
 
                 if (funct3 == 0b000) { // LB
-                    uint8_t b = mem_read8(addr, mem, &ok2);
+                    int8_t b = (int8_t)mem_read8(addr, mem, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = (uint32_t)(int8_t)b;
+                    x[rd] = (int32_t)b;
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                     out2(output, pc_curr, "lb", ops, msg);
                 }
                 else if (funct3 == 0b001) { // LH
-                    uint16_t h = mem_read16(addr, mem, &ok2);
+                    int16_t h = (int16_t)mem_read16(addr, mem, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = (uint32_t)(int16_t)h;
+                    x[rd] = (int32_t)h;
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
@@ -1054,7 +1121,7 @@ int main(int argc, char* argv[]) {
                         char ops[32], msg[96];
                         snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), csrnm, rname(rs1));
                         snprintf(msg, sizeof(msg), "%s=%s=0x%08x,%s=%s=0x%08x",
-                                rname(rd), csrnm, old, csrnm, rname(rs1), rs1_val);
+                                 rname(rd), csrnm, old, csrnm, rname(rs1), rs1_val);
                         out2(output, pc_curr, "csrrw", ops, msg);
                     }
                     else if (funct3 == 0b010) { // CSRRS
@@ -1069,9 +1136,9 @@ int main(int argc, char* argv[]) {
                         char ops[32], msg[160];
                         snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), csrnm, rname(rs1));
                         snprintf(msg, sizeof(msg),
-                                "%s=%s=0x%08x,%s|=%s=0x%08x|0x%08x=0x%08x",
-                                rname(rd), csrnm, old,
-                                csrnm, rname(rs1), old, rs1_val, new_csr);
+                                 "%s=%s=0x%08x,%s|=%s=0x%08x|0x%08x=0x%08x",
+                                 rname(rd), csrnm, old,
+                                 csrnm, rname(rs1), old, rs1_val, new_csr);
                         out2(output, pc_curr, "csrrs", ops, msg);
                     }
                     else {
@@ -1106,15 +1173,13 @@ end_of_loop:
         uint32_t global_mie = (csr_mstatus & (1u << 3));
 
         if (global_mie) {
-            if (soft_irq_pending && (csr_mie & (1u << 3))) {            // MSIE
-                uint32_t irq_cause = 0x80000003u;
+            if ((csr_mip & (1u << 11)) && (csr_mie & (1u << 11))) { // MEIP
+                uint32_t irq_cause = 0x8000000Bu;
                 uint32_t epc = pc_next;
                 raise_interrupt(irq_cause, epc, 0, &pc_next, output);
-
-                soft_irq_pending = 0;
-                csr_mip &= ~(1u << 3);
+                // NÃO zera aqui: vai zerar no COMPLETE do PLIC
             }
-            else if (timer_irq_pending && (csr_mie & (1u << 7))) {      // MTIE
+            else if ((csr_mip & (1u << 7)) && (csr_mie & (1u << 7))) { // MTIP
                 uint32_t irq_cause = 0x80000007u;
                 uint32_t epc = pc_next;
                 raise_interrupt(irq_cause, epc, 0, &pc_next, output);
@@ -1122,11 +1187,13 @@ end_of_loop:
                 timer_irq_pending = 0;
                 csr_mip &= ~(1u << 7);
             }
-            else if (uart_irq_pending && (csr_mie & (1u << 11))) {      // MEIE
-                uint32_t irq_cause = 0x8000000Bu;
+            else if ((csr_mip & (1u << 3)) && (csr_mie & (1u << 3))) { // MSIP
+                uint32_t irq_cause = 0x80000003u;
                 uint32_t epc = pc_next;
                 raise_interrupt(irq_cause, epc, 0, &pc_next, output);
-                // zera quando fizer complete no PLIC
+
+                soft_irq_pending = 0;
+                csr_mip &= ~(1u << 3);
             }
         }
 
