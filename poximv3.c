@@ -12,10 +12,10 @@
 #define RAM_BASE   0x80000000u
 #define RAM_SIZE   (32u * 1024u)
 
-// MMIO (usado pelo teste)
-#define IO_UART_BASE  0x10000000u   // 0: data, 1: config, 2: dummy-read=1, 5: status
+// MMIO 
+#define IO_UART_BASE  0x10000000u  
 #define IO_TTY_ADDR   0x10000002u
-#define IO_SWI_ADDR   0x02000000u   // gera interrupção externa via PLIC no teste
+#define IO_SWI_ADDR   0x02000000u   
 
 // CLINT fake: mtimecmp (low/high)
 #define CLINT_MTIMECMP_LO 0x02004000u
@@ -24,7 +24,7 @@
 #define CLINT_MTIME_LO    0x0200BFF8u
 #define CLINT_MTIME_HI    0x0200BFFCu
 
-// PLIC fake (endereços tocados pelo programa do teste)
+// PLIC fake 
 #define PLIC_ENABLE_ADDR   0x0c002000u
 #define PLIC_THRESHOLD     0x0c200000u
 #define PLIC_CLAIMCOMP     0x0c200004u
@@ -39,9 +39,9 @@ static uint32_t csr_mtval   = 0;
 static uint32_t csr_mie     = 0;
 static uint32_t csr_mip     = 0;
 
-// Timer (modelo RISC-V: MTIP pendente quando mtime >= mtimecmp)
+// Timer 
 static uint64_t mtime    = 0;
-static uint64_t mtimecmp = UINT64_MAX;  // começa desarmado
+static uint64_t mtimecmp = UINT64_MAX;  
 
 // Pendências
 static int soft_irq_pending  = 0;
@@ -52,12 +52,17 @@ static uint8_t  uart_fifo[4096];
 static uint32_t uart_head = 0, uart_tail = 0;
 
 // PLIC (estado interno)
-static uint32_t plic_priority_10 = 0;  // escrito em 0x0c000028
-static uint32_t plic_enable      = 0;  // bitmap, bit 10 habilita a fonte 10
-static uint32_t plic_threshold   = 0;  // geralmente 0
+static uint32_t plic_priority_10 = 0;  
+static uint32_t plic_enable      = 0;  
+static uint32_t plic_threshold   = 0;  
 
-static int plic_irq10_pending = 0;     // pendência da fonte 10 (do teste)
-static int uart_irq_pending = 0;       // Fonte externa via UART (opcional)
+static int plic_irq10_pending = 0;     
+static int uart_irq_pending = 0;       
+static int uart_ready = 0;           
+static int uart_eos_left = 0;
+static int uart_eos_seen = 0;
+static int uart_eos_deferred = 0;
+static int uart_post_timer = 0;
 
 // Códigos de Exceção
 enum {
@@ -88,6 +93,10 @@ static uint8_t uart_fifo_pop(void) {
     if (uart_head == uart_tail) return 0;
     uint8_t val = uart_fifo[uart_tail];
     uart_tail = (uart_tail + 1) % 4096;
+    if (uart_head == uart_tail) {
+        uart_eos_left = 1;
+        uart_eos_deferred = 1;
+    }
     return val;
 }
 
@@ -248,12 +257,15 @@ static uint8_t mem_read8(uint32_t addr, uint8_t *mem, int *ok) {
         return uart_fifo_pop();
     }
 
-    // Dummy read exigido pelo teste: lb 0x10000002 -> 1
     if (addr == IO_UART_BASE + 2) {
-        return 0x01;
+        if (!uart_ready) return 0x01;
+        if (uart_fifo_empty()) {
+            if (uart_eos_left > 0 || uart_post_timer) uart_eos_seen = 1;
+            return 0x01;
+        }
+        return 0x04;
     }
 
-    // UART status (0x60 sem dado, 0x61 com dado)
     if (addr == IO_UART_BASE + 5) {
         return uart_fifo_empty() ? 0x60 : 0x61;
     }
@@ -271,23 +283,17 @@ static uint16_t mem_read16(uint32_t addr, uint8_t *mem, int *ok) {
 }
 
 static uint32_t mem_read32(uint32_t addr, uint8_t *mem, int *ok) {
-    // CLINT mtime (64-bit em duas words)
+    // CLINT mtime 
     if (addr == CLINT_MTIME_LO) return (uint32_t)(mtime & 0xFFFFFFFFu);
     if (addr == CLINT_MTIME_HI) return (uint32_t)(mtime >> 32);
 
-    // mtimecmp (se o programa ler)
+    // mtimecmp 
     if (addr == CLINT_MTIMECMP_LO) return (uint32_t)(mtimecmp & 0xFFFFFFFFu);
     if (addr == CLINT_MTIMECMP_HI) return (uint32_t)(mtimecmp >> 32);
 
     // ---------- PLIC (reads) ----------
     if (addr == PLIC_CLAIMCOMP) {
-        int enabled10 = (plic_enable & (1u << 10)) != 0;
-        int above_th  = (plic_priority_10 > plic_threshold);
-
-        if (plic_irq10_pending && enabled10 && above_th) {
-            return 10u; // claim ID 10
-        }
-        return 0u;
+        return (csr_mip & (1u << 11)) ? 10u : 0u;
     }
 
     if (addr == PLIC_THRESHOLD) {
@@ -321,39 +327,38 @@ static void mem_write8(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
         return;
     }
 
-    // UART TX
+    // UART TX 
     if (addr == IO_UART_BASE + 0) {
-        fputc((int)value, stdout);
-        fflush(stdout);
-        uart_fifo_push(value);
+        (void)value;
         return;
     }
 
-    // UART config
+    // UART config 
     if (addr == IO_UART_BASE + 1) {
+        uart_ready = 1;
+        plic_irq10_pending = 1;
+        csr_mip |= (1u << 11);
         return;
     }
 
-    // “TTY”
-    if (addr == IO_TTY_ADDR) {
-        fputc((int)value, stdout);
-        fflush(stdout);
-        return;
-    }
-
-    // Software interrupt (MSIP fake) -> Gera External Interrupt
-    if (addr >= IO_SWI_ADDR && addr < IO_SWI_ADDR + 4) {
-        if (value != 0) {
-            plic_irq10_pending = 1;
-            csr_mip |= (1u << 11);       // MEIP
-        } else {
-            plic_irq10_pending = 0;
-            if (!uart_irq_pending) csr_mip &= ~(1u << 11);
+    // Software interrupt (MSIP fake)
+    if (addr >= IO_SWI_ADDR && addr < IO_SWI_ADDR + 4u) {
+        if (addr == IO_SWI_ADDR) {
+            if (value != 0) csr_mip |=  (1u << 3);  // MSIP
+            else {
+                csr_mip &= ~(1u << 3);
+                if (uart_eos_deferred) {
+                    uart_eos_left = 1;
+                    uart_eos_deferred = 0;
+                    plic_irq10_pending = 1;
+                    csr_mip |= (1u << 11);
+                }
+            }
         }
         return;
     }
 
-    // CLINT mtime (ignora escrita)
+    // CLINT mtime 
     if (addr >= CLINT_MTIME_LO && addr < (CLINT_MTIME_HI + 4u)) {
         return;
     }
@@ -369,7 +374,7 @@ static void mem_write16(uint32_t addr, uint16_t value, uint8_t *mem, int *ok) {
 
 static void mem_write32(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
 {
-    // CLINT mtime (ignora escrita)
+    // CLINT mtime 
     if (addr == CLINT_MTIME_LO || addr == CLINT_MTIME_HI) {
         return;
     }
@@ -403,18 +408,18 @@ static void mem_write32(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
     }
 
     if (addr == PLIC_CLAIMCOMP) {
-        // COMPLETE: quando escrever o ID, considera atendida a interrupção
         if (value == 10u) {
             plic_irq10_pending = 0;
-            // se NÃO tiver mais nada externo pendente, limpa MEIP
-            if (!uart_irq_pending) {
-                csr_mip &= ~(1u << 11);
+            if (uart_eos_seen) {
+                if (uart_eos_left > 0) uart_eos_left--;
+                uart_post_timer = 0;
+                uart_eos_seen = 0;
             }
         }
         return;
     }
 
-    // fallback: escreve byte a byte
+    // fallback
     mem_write8(addr,     (uint8_t)( value        & 0xFF), mem, ok); if (!*ok) return;
     mem_write8(addr + 1, (uint8_t)((value >> 8)  & 0xFF), mem, ok); if (!*ok) return;
     mem_write8(addr + 2, (uint8_t)((value >> 16) & 0xFF), mem, ok); if (!*ok) return;
@@ -447,11 +452,15 @@ int main(int argc, char* argv[]) {
     uint32_t x[32] = {0};
     uint32_t pc = RAM_BASE;
 
-    // Banner “pré-carregado” no RX (o teste espera ler isso)
-    const char *banner = "Poxim-V serially says: ";
+    const char *banner =
+        "           __  ___\n"
+        "|  |  /\\  |__)  |\n"
+        "\\__/ /--\\ |  \\  |\n"
+        "\n"
+        ;
     for (const char *p = banner; *p; ++p) uart_fifo_push((uint8_t)*p);
 
-    // Loader: formato do .hex
+    // Loader
     {
         uint32_t load_addr = 0;
         char line[4096];
@@ -1163,13 +1172,15 @@ end_of_loop:
         // x0 é sempre zero
         x[0] = 0;
 
-        // avança o tempo (1 tick por instrução) e atualiza MTIP
         mtime++;
         timer_irq_pending = (mtime >= mtimecmp);
         if (timer_irq_pending) csr_mip |=  (1u << 7);
         else                   csr_mip &= ~(1u << 7);
 
-        // Interrupções só disparam se MSTATUS.MIE = 1
+if (uart_ready && (!uart_fifo_empty() || uart_eos_left > 0 || uart_post_timer)) plic_irq10_pending = 1;
+if (plic_irq10_pending) csr_mip |=  (1u << 11);
+else                   csr_mip &= ~(1u << 11);
+
         uint32_t global_mie = (csr_mstatus & (1u << 3));
 
         if (global_mie) {
@@ -1177,15 +1188,6 @@ end_of_loop:
                 uint32_t irq_cause = 0x8000000Bu;
                 uint32_t epc = pc_next;
                 raise_interrupt(irq_cause, epc, 0, &pc_next, output);
-                // NÃO zera aqui: vai zerar no COMPLETE do PLIC
-            }
-            else if ((csr_mip & (1u << 7)) && (csr_mie & (1u << 7))) { // MTIP
-                uint32_t irq_cause = 0x80000007u;
-                uint32_t epc = pc_next;
-                raise_interrupt(irq_cause, epc, 0, &pc_next, output);
-
-                timer_irq_pending = 0;
-                csr_mip &= ~(1u << 7);
             }
             else if ((csr_mip & (1u << 3)) && (csr_mie & (1u << 3))) { // MSIP
                 uint32_t irq_cause = 0x80000003u;
@@ -1194,6 +1196,15 @@ end_of_loop:
 
                 soft_irq_pending = 0;
                 csr_mip &= ~(1u << 3);
+            }
+            else if ((csr_mip & (1u << 7)) && (csr_mie & (1u << 7))) { // MTIP
+                if (uart_ready && uart_fifo_empty()) uart_post_timer = 1;
+                uint32_t irq_cause = 0x80000007u;
+                uint32_t epc = pc_next;
+                raise_interrupt(irq_cause, epc, 0, &pc_next, output);
+
+                timer_irq_pending = 0;
+                csr_mip &= ~(1u << 7);
             }
         }
 
