@@ -64,6 +64,185 @@ static int uart_eos_seen = 0;
 static int uart_eos_deferred = 0;
 static int uart_post_timer = 0;
 
+// -------------------- CACHE (PoximV3) --------------------
+
+#define CACHE_SIZE_BYTES   256u
+#define CACHE_BLOCK_WORDS  4u
+#define CACHE_WORD_BYTES   4u
+#define CACHE_BLOCK_BYTES  (CACHE_BLOCK_WORDS * CACHE_WORD_BYTES) // 16
+#define CACHE_WAYS         2u
+#define CACHE_LINES        (CACHE_SIZE_BYTES / CACHE_BLOCK_BYTES) // 16
+#define CACHE_SETS         (CACHE_LINES / CACHE_WAYS)             // 8
+
+typedef struct {
+    uint8_t  valid;
+    uint32_t tag;
+    uint32_t data[CACHE_BLOCK_WORDS]; // 4 palavras
+} cache_line_t;
+
+typedef struct {
+    cache_line_t way[CACHE_WAYS];
+    uint8_t lru; // para 2 vias: guarda qual via é a "LRU" (0 ou 1)
+} cache_set_t;
+
+typedef struct {
+    cache_set_t set[CACHE_SETS];
+    uint64_t accesses;
+    uint64_t hits;
+} cache_t;
+
+static cache_t icache, dcache;
+
+static inline int is_ram(uint32_t addr) {
+    return (addr >= RAM_BASE && addr < RAM_BASE + RAM_SIZE);
+}
+
+// MMIO/fora da RAM: não entra na cache
+static inline int cacheable(uint32_t addr) {
+    return is_ram(addr);
+}
+
+static inline uint32_t block_base(uint32_t addr) { return addr & ~(CACHE_BLOCK_BYTES - 1u); }
+static inline uint32_t set_index(uint32_t addr)  { return (addr >> 4) & (CACHE_SETS - 1u); } // bits [6:4]
+static inline uint32_t tag_of(uint32_t addr)     { return addr >> 7; }
+static inline uint32_t word_index(uint32_t addr) { return (addr >> 2) & 3u; }
+
+static void cache_reset(cache_t *c) {
+    memset(c, 0, sizeof(*c));
+}
+
+static uint32_t cache_read32(cache_t *c,
+                             const char *name, // "i" ou "d" p/ log
+                             uint32_t addr,
+                             uint8_t *mem,
+                             FILE *output,
+                             int *ok)
+{
+    // Se não é cacheável (MMIO etc), bypass total
+    if (!cacheable(addr)) {
+        return mem_read32_raw(addr, mem, ok);
+    }
+
+    c->accesses++;
+
+    uint32_t si  = set_index(addr);
+    uint32_t tg  = tag_of(addr);
+    uint32_t wi  = word_index(addr);
+
+    cache_set_t *S = &c->set[si];
+
+    int hit_way = -1;
+    for (int w = 0; w < (int)CACHE_WAYS; w++) {
+        if (S->way[w].valid && S->way[w].tag == tg) {
+            hit_way = w;
+            break;
+        }
+    }
+
+    if (hit_way >= 0) {
+        c->hits++;
+
+        // Atualiza LRU: a outra via vira a LRU
+        S->lru = (uint8_t)(1 - hit_way);
+
+        uint32_t val = S->way[hit_way].data[wi];
+
+        // Log (ajusta formato se teu professor exigir algo específico)
+        fprintf(output, "#cache_%s:ir 0x%08x line=%u,way=%d,hit=1,tag=0x%08x\n",
+                name, addr, si, hit_way, tg);
+        fflush(output);
+
+        *ok = 1;
+        return val;
+    }
+
+    // MISS: escolher vítima (primeiro inválido, senão LRU)
+    int victim = -1;
+    for (int w = 0; w < (int)CACHE_WAYS; w++) {
+        if (!S->way[w].valid) { victim = w; break; }
+    }
+    if (victim < 0) victim = S->lru;
+
+    // Refill do bloco
+    uint32_t base = block_base(addr);
+    int ok2 = 1;
+    uint32_t block[CACHE_BLOCK_WORDS];
+    for (int i = 0; i < 4; i++) {
+        block[i] = mem_read32_raw(base + 4u*(uint32_t)i, mem, &ok2);
+        if (!ok2) break;
+    }
+
+    // Log miss
+    fprintf(output, "#cache_%s:ir 0x%08x line=%u,way=%d,hit=0,fill=0x%08x\n",
+            name, addr, si, victim, base);
+    fflush(output);
+
+    if (!ok2) {
+        *ok = 0;
+        return 0;
+    }
+
+    S->way[victim].valid = 1;
+    S->way[victim].tag   = tg;
+    for (int i = 0; i < 4; i++) S->way[victim].data[i] = block[i];
+
+    // Após usar victim, a outra via vira LRU
+    S->lru = (uint8_t)(1 - victim);
+
+    *ok = 1;
+    return S->way[victim].data[wi];
+}
+
+static void dcache_write32(uint32_t addr,
+                           uint32_t value,
+                           uint8_t *mem,
+                           FILE *output,
+                           int *ok)
+{
+    // 1) write-through: SEMPRE escreve na memória real
+    mem_write32_raw(addr, value, mem, ok);
+    if (!*ok) return;
+
+    // 2) não cacheia MMIO / fora da RAM
+    if (!cacheable(addr)) return;
+
+    // 3) contabiliza acesso na D-cache
+    dcache.accesses++;
+
+    uint32_t si  = set_index(addr);
+    uint32_t tg  = tag_of(addr);
+    uint32_t wi  = word_index(addr);
+
+    cache_set_t *S = &dcache.set[si];
+
+    int hit_way = -1;
+    for (int w = 0; w < (int)CACHE_WAYS; w++) {
+        if (S->way[w].valid && S->way[w].tag == tg) {
+            hit_way = w;
+            break;
+        }
+    }
+
+    if (hit_way >= 0) {
+        // HIT: atualiza a palavra dentro do bloco
+        dcache.hits++;
+        S->way[hit_way].data[wi] = value;
+
+        // LRU: a outra via vira LRU
+        S->lru = (uint8_t)(1 - hit_way);
+
+        fprintf(output, "#cache_d:dw 0x%08x line=%u,way=%d,hit=1\n",
+                addr, si, hit_way);
+        fflush(output);
+    } else {
+        // MISS: no write allocate -> NÃO preenche bloco
+        fprintf(output, "#cache_d:dw 0x%08x line=%u,hit=0(no-alloc)\n",
+                addr, si);
+        fflush(output);
+    }
+}
+
+
 // Códigos de Exceção
 enum {
     EXC_INST_FAULT       = 1,
@@ -247,7 +426,7 @@ static void out2(FILE* output,
 
 // -------------------- Memória / MMIO --------------------
 
-static uint8_t mem_read8(uint32_t addr, uint8_t *mem, int *ok) {
+static uint8_t mem_read8_raw(uint32_t addr, uint8_t *mem, int *ok) {
     if (addr >= RAM_BASE && addr < RAM_BASE + RAM_SIZE) {
         return mem[addr - RAM_BASE];
     }
@@ -274,15 +453,15 @@ static uint8_t mem_read8(uint32_t addr, uint8_t *mem, int *ok) {
     return 0;
 }
 
-static uint16_t mem_read16(uint32_t addr, uint8_t *mem, int *ok) {
-    uint16_t lo = mem_read8(addr,     mem, ok);
+static uint16_t mem_read16_raw(uint32_t addr, uint8_t *mem, int *ok) {
+    uint16_t lo = mem_read8_raw(addr,     mem, ok);
     if (!*ok) return 0;
-    uint16_t hi = mem_read8(addr + 1, mem, ok);
+    uint16_t hi = mem_read8_raw(addr + 1, mem, ok);
     if (!*ok) return 0;
     return (uint16_t)(lo | (hi << 8));
 }
 
-static uint32_t mem_read32(uint32_t addr, uint8_t *mem, int *ok) {
+static uint32_t mem_read32_raw(uint32_t addr, uint8_t *mem, int *ok) {
     // CLINT mtime 
     if (addr == CLINT_MTIME_LO) return (uint32_t)(mtime & 0xFFFFFFFFu);
     if (addr == CLINT_MTIME_HI) return (uint32_t)(mtime >> 32);
@@ -312,15 +491,15 @@ static uint32_t mem_read32(uint32_t addr, uint8_t *mem, int *ok) {
         return 0u;
     }
 
-    uint32_t b0 = mem_read8(addr,     mem, ok); if (!*ok) return 0;
-    uint32_t b1 = mem_read8(addr + 1, mem, ok); if (!*ok) return 0;
-    uint32_t b2 = mem_read8(addr + 2, mem, ok); if (!*ok) return 0;
-    uint32_t b3 = mem_read8(addr + 3, mem, ok); if (!*ok) return 0;
+    uint32_t b0 = mem_read8_raw(addr,     mem, ok); if (!*ok) return 0;
+    uint32_t b1 = mem_read8_raw(addr + 1, mem, ok); if (!*ok) return 0;
+    uint32_t b2 = mem_read8_raw(addr + 2, mem, ok); if (!*ok) return 0;
+    uint32_t b3 = mem_read8_raw(addr + 3, mem, ok); if (!*ok) return 0;
 
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-static void mem_write8(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
+static void mem_write8_raw(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
 {
     if (addr >= RAM_BASE && addr < RAM_BASE + RAM_SIZE) {
         mem[addr - RAM_BASE] = value;
@@ -366,17 +545,17 @@ static void mem_write8(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
     *ok = 0;
 }
 
-static void mem_write16(uint32_t addr, uint16_t value, uint8_t *mem, int *ok) {
-    mem_write8(addr,     (uint8_t)( value       & 0xFF), mem, ok);
+static void mem_write16_raw(uint32_t addr, uint16_t value, uint8_t *mem, int *ok) {
+    mem_write8_raw(addr,     (uint8_t)( value       & 0xFF), mem, ok);
     if (!*ok) return;
-    mem_write8(addr + 1, (uint8_t)((value >> 8) & 0xFF), mem, ok);
+    mem_write8_raw(addr + 1, (uint8_t)((value >> 8) & 0xFF), mem, ok);
 }
 
-static void mem_write32(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
+static void mem_write32_raw(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
 {
     // CLINT mtime 
     if (addr == CLINT_MTIME_LO || addr == CLINT_MTIME_HI) {
-        return;
+        return; 
     }
 
     // mtimecmp low/high
@@ -420,10 +599,10 @@ static void mem_write32(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
     }
 
     // fallback
-    mem_write8(addr,     (uint8_t)( value        & 0xFF), mem, ok); if (!*ok) return;
-    mem_write8(addr + 1, (uint8_t)((value >> 8)  & 0xFF), mem, ok); if (!*ok) return;
-    mem_write8(addr + 2, (uint8_t)((value >> 16) & 0xFF), mem, ok); if (!*ok) return;
-    mem_write8(addr + 3, (uint8_t)((value >> 24) & 0xFF), mem, ok);
+    mem_write8_raw(addr,     (uint8_t)( value        & 0xFF), mem, ok); if (!*ok) return;
+    mem_write8_raw(addr + 1, (uint8_t)((value >> 8)  & 0xFF), mem, ok); if (!*ok) return;
+    mem_write8_raw(addr + 2, (uint8_t)((value >> 16) & 0xFF), mem, ok); if (!*ok) return;
+    mem_write8_raw(addr + 3, (uint8_t)((value >> 24) & 0xFF), mem, ok);
 }
 
 
@@ -448,6 +627,10 @@ int main(int argc, char* argv[]) {
     uint8_t* mem = (uint8_t*)malloc(RAM_SIZE);
     if (!mem) { fclose(input); fclose(output); return 1; }
     memset(mem, 0, RAM_SIZE);
+
+    cache_reset(&icache);
+    cache_reset(&dcache);
+
 
     uint32_t x[32] = {0};
     uint32_t pc = RAM_BASE;
@@ -499,7 +682,7 @@ int main(int argc, char* argv[]) {
         uint32_t pc_curr = pc;
         uint32_t pc_next = pc + 4;
 
-        uint32_t instruction = mem_read32(pc, mem, &ok);
+        uint32_t instruction = cache_read32(&icache, "i", pc, mem, output, &ok);
         if (!ok) {
             raise_exception(EXC_INST_FAULT, pc_curr, 0, &pc_next, output);
             goto end_of_loop;
@@ -805,7 +988,7 @@ int main(int argc, char* argv[]) {
                 int ok2 = 1;
 
                 if (funct3 == 0b000) { // LB
-                    int8_t b = (int8_t)mem_read8(addr, mem, &ok2);
+                    int8_t b = (int8_t)mem_read8_raw(addr, mem, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
                     x[rd] = (int32_t)b;
                     char ops[32], msg[128];
@@ -814,7 +997,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "lb", ops, msg);
                 }
                 else if (funct3 == 0b001) { // LH
-                    int16_t h = (int16_t)mem_read16(addr, mem, &ok2);
+                    int16_t h = (int16_t)mem_read16_raw(addr, mem, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
                     x[rd] = (int32_t)h;
                     char ops[32], msg[128];
@@ -823,7 +1006,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "lh", ops, msg);
                 }
                 else if (funct3 == 0b010) { // LW
-                    uint32_t w = mem_read32(addr, mem, &ok2);
+                    uint32_t w = cache_read32(&dcache, "d", addr, mem, output, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
                     x[rd] = w;
                     char ops[32], msg[128];
@@ -832,7 +1015,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "lw", ops, msg);
                 }
                 else if (funct3 == 0b100) { // LBU
-                    uint8_t b = mem_read8(addr, mem, &ok2);
+                    uint8_t b = mem_read8_raw(addr, mem, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
                     x[rd] = (uint32_t)b;
                     char ops[32], msg[128];
@@ -841,7 +1024,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "lbu", ops, msg);
                 }
                 else if (funct3 == 0b101) { // LHU
-                    uint16_t h = mem_read16(addr, mem, &ok2);
+                    uint16_t h = mem_read16_raw(addr, mem, &ok2);
                     if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
                     x[rd] = (uint32_t)h;
                     char ops[32], msg[128];
@@ -870,7 +1053,7 @@ int main(int argc, char* argv[]) {
 
                 if (funct3 == 0b000) { // SB
                     uint8_t b = (uint8_t)(x[rs2] & 0xFF);
-                    mem_write8(addr, b, mem, &ok2);
+                    mem_write8_raw(addr, b, mem, &ok2);
                     if (!ok2) {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
@@ -884,7 +1067,7 @@ int main(int argc, char* argv[]) {
                 }
                 else if (funct3 == 0b001) { // SH
                     uint16_t h = (uint16_t)(x[rs2] & 0xFFFF);
-                    mem_write16(addr, h, mem, &ok2);
+                    mem_write16_raw(addr, h, mem, &ok2);
                     if (!ok2) {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
@@ -898,7 +1081,7 @@ int main(int argc, char* argv[]) {
                 }
                 else if (funct3 == 0b010) { // SW
                     uint32_t w = x[rs2];
-                    mem_write32(addr, w, mem, &ok2);
+                    dcache_write32(addr, w, mem, output, &ok2);
                     if (!ok2) {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
@@ -1210,6 +1393,22 @@ else                   csr_mip &= ~(1u << 11);
 
         pc = pc_next;
     }
+
+    double ih = (icache.accesses ? (100.0 * (double)icache.hits / (double)icache.accesses) : 0.0);
+    double dh = (dcache.accesses ? (100.0 * (double)dcache.hits / (double)dcache.accesses) : 0.0);
+
+    fprintf(output, "#cache_i:stats hits=%llu accesses=%llu hit%%=%.4f\n",
+            (unsigned long long)icache.hits,
+            (unsigned long long)icache.accesses,
+            ih);
+
+    fprintf(output, "#cache_d:stats hits=%llu accesses=%llu hit%%=%.4f\n",
+            (unsigned long long)dcache.hits,
+            (unsigned long long)dcache.accesses,
+            dh);
+
+    fflush(output);
+
 
     fclose(input);
     fclose(output);
