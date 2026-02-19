@@ -365,7 +365,9 @@ static void dcache_write32(uint32_t addr, uint32_t value, uint8_t *mem, FILE *ou
 enum {
     EXC_INST_FAULT       = 1,
     EXC_ILLEGAL_INST     = 2,
+    EXC_LOAD_MISALIGNED  = 4, 
     EXC_LOAD_FAULT       = 5,
+    EXC_STORE_MISALIGNED = 6, 
     EXC_STORE_FAULT      = 7,
     EXC_ENV_CALL_M       = 11,
 };
@@ -466,11 +468,13 @@ static void raise_exception(uint32_t cause,
 {
     const char *name = "unknown";
     switch (cause) {
-        case EXC_INST_FAULT:   name = "instruction_fault";   break;
-        case EXC_ILLEGAL_INST: name = "illegal_instruction"; break;
-        case EXC_LOAD_FAULT:   name = "load_fault";          break;
-        case EXC_STORE_FAULT:  name = "store_fault";         break;
-        case EXC_ENV_CALL_M:   name = "environment_call";    break;
+        case EXC_INST_FAULT:       name = "instruction_fault";        break;
+        case EXC_ILLEGAL_INST:     name = "illegal_instruction";      break;
+        case EXC_LOAD_MISALIGNED:  name = "load_address_misaligned";  break; 
+        case EXC_LOAD_FAULT:       name = "load_fault";               break;
+        case EXC_STORE_MISALIGNED: name = "store_address_misaligned"; break; 
+        case EXC_STORE_FAULT:      name = "store_fault";              break;
+        case EXC_ENV_CALL_M:       name = "environment_call";         break;
     }
 
     csr_mcause = cause;
@@ -1145,6 +1149,20 @@ int main(int argc, char* argv[]) {
                 uint32_t addr = x[rs1] + imm12;
                 int ok2 = 1;
 
+                // --- CHECAGEM DE ALINHAMENTO ---
+                if (funct3 == 0b010 && (addr & 3) != 0) { 
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_LOAD_MISALIGNED, pc_curr, addr, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
+                }
+                if ((funct3 == 0b001 || funct3 == 0b101) && (addr & 1) != 0) { 
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_LOAD_MISALIGNED, pc_curr, addr, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
+                }
+
                 if (!cacheable(addr)) {
                     const char *mnem = "load";
                     
@@ -1253,6 +1271,20 @@ int main(int argc, char* argv[]) {
 
                 uint32_t addr = x[rs1] + immS;
                 int ok2 = 1;
+
+                // --- CHECAGEM DE ALINHAMENTO ---
+                if (funct3 == 0b010 && (addr & 3) != 0) { // SW
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_STORE_MISALIGNED, pc_curr, addr, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
+                }
+                if (funct3 == 0b001 && (addr & 1) != 0) { // SH
+                    uint32_t pc_exc = pc_curr + 4;
+                    raise_exception(EXC_STORE_MISALIGNED, pc_curr, addr, &pc_exc, output);
+                    pc_next = pc_exc;
+                    goto end_of_loop;
+                }
 
                 if (funct3 == 0b000) { // SB
                     uint8_t b = (uint8_t)(x[rs2] & 0xFF);
