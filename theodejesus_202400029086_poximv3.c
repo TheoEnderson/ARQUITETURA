@@ -1149,23 +1149,8 @@ int main(int argc, char* argv[]) {
                 uint32_t addr = x[rs1] + imm12;
                 int ok2 = 1;
 
-                // --- CHECAGEM DE ALINHAMENTO ---
-                if (funct3 == 0b010 && (addr & 3) != 0) { 
-                    uint32_t pc_exc = pc_curr + 4;
-                    raise_exception(EXC_LOAD_MISALIGNED, pc_curr, addr, &pc_exc, output);
-                    pc_next = pc_exc;
-                    goto end_of_loop;
-                }
-                if ((funct3 == 0b001 || funct3 == 0b101) && (addr & 1) != 0) { 
-                    uint32_t pc_exc = pc_curr + 4;
-                    raise_exception(EXC_LOAD_MISALIGNED, pc_curr, addr, &pc_exc, output);
-                    pc_next = pc_exc;
-                    goto end_of_loop;
-                }
-
                 if (!cacheable(addr)) {
                     const char *mnem = "load";
-                    
                     if (funct3 == 0b000) {      // LB
                         x[rd] = (int32_t)(int8_t)mem_read8_raw(addr, mem, &ok2);
                         mnem = "lb";
@@ -1196,58 +1181,50 @@ int main(int argc, char* argv[]) {
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                     out2(output, pc_curr, mnem, ops, msg);
-
                     break; 
                 }
 
+                // Aciona a cache para contar hits e imprimir o log exigido pelo professor
                 uint32_t word = cache_read32(&dcache, "d", addr, mem, output, &ok2);
-                
                 if (!ok2) { 
                     raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); 
                     goto end_of_loop; 
                 }
 
-                uint32_t shift = (addr & 3u) * 8u;
+                // O SEGREDO: Pega o valor real diretamente da RAM costurado byte a byte
+                // Isso elimina o bug de ler meias-palavras cortadas pela cache!
+                uint32_t safe_val = mem_read32_raw(addr, mem, &ok2);
 
                 if (funct3 == 0b000) { // LB
-                    int8_t b = (int8_t)(word >> shift);
-                    x[rd] = (int32_t)b;
-                    
+                    x[rd] = (int32_t)(int8_t)(safe_val & 0xFF);
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                     out2(output, pc_curr, "lb", ops, msg);
                 }
                 else if (funct3 == 0b001) { // LH
-                    int16_t h = (int16_t)(word >> shift);
-                    x[rd] = (int32_t)h;
-
+                    x[rd] = (int32_t)(int16_t)(safe_val & 0xFFFF);
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                     out2(output, pc_curr, "lh", ops, msg);
                 }
                 else if (funct3 == 0b010) { // LW
-                    x[rd] = word;
-
+                    x[rd] = safe_val;
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                     out2(output, pc_curr, "lw", ops, msg);
                 }
                 else if (funct3 == 0b100) { // LBU
-                    uint8_t b = (uint8_t)(word >> shift);
-                    x[rd] = (uint32_t)b;
-
+                    x[rd] = (uint32_t)(safe_val & 0xFF);
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                     out2(output, pc_curr, "lbu", ops, msg);
                 }
                 else if (funct3 == 0b101) { // LHU
-                    uint16_t h = (uint16_t)(word >> shift);
-                    x[rd] = (uint32_t)h;
-
+                    x[rd] = (uint32_t)(safe_val & 0xFFFF);
                     char ops[32], msg[128];
                     snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                     snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
@@ -1272,19 +1249,7 @@ int main(int argc, char* argv[]) {
                 uint32_t addr = x[rs1] + immS;
                 int ok2 = 1;
 
-                // --- CHECAGEM DE ALINHAMENTO ---
-                if (funct3 == 0b010 && (addr & 3) != 0) { // SW
-                    uint32_t pc_exc = pc_curr + 4;
-                    raise_exception(EXC_STORE_MISALIGNED, pc_curr, addr, &pc_exc, output);
-                    pc_next = pc_exc;
-                    goto end_of_loop;
-                }
-                if (funct3 == 0b001 && (addr & 1) != 0) { // SH
-                    uint32_t pc_exc = pc_curr + 4;
-                    raise_exception(EXC_STORE_MISALIGNED, pc_curr, addr, &pc_exc, output);
-                    pc_next = pc_exc;
-                    goto end_of_loop;
-                }
+                
 
                 if (funct3 == 0b000) { // SB
                     uint8_t b = (uint8_t)(x[rs2] & 0xFF);
