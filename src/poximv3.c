@@ -41,7 +41,7 @@ static uint32_t csr_mip     = 0;
 
 // Timer 
 static uint64_t mtime    = 0;
-static uint64_t mtimecmp = UINT64_MAX;  
+static uint64_t mtimecmp = 0;  
 
 // Pendências
 static int soft_irq_pending  = 0;
@@ -57,19 +57,24 @@ static uint32_t plic_enable      = 0;
 static uint32_t plic_threshold   = 0;  
 
 static int plic_irq10_pending = 0;     
-static int uart_irq_pending = 0;       
-static int uart_ready = 0;           
-static int uart_eos_left = 0;
-static int uart_eos_seen = 0;
-static int uart_eos_deferred = 0;
-static int uart_post_timer = 0;
+//static int uart_irq_pending = 0;        
+static int uart_ready = 1;            
+//static int uart_eos_left = 0;
+//static int uart_eos_seen = 0;
+//static int uart_eos_deferred = 0;
+//static int uart_post_timer = 0;
 
-// -------------------- CACHE (PoximV3) --------------------
+static uint32_t mem_read32_raw(uint32_t addr, uint8_t *mem, int *ok);
+static void mem_write32_raw(uint32_t addr, uint32_t value, uint8_t *mem, int *ok);
+static void mem_write8_raw(uint32_t addr, uint8_t value, uint8_t *mem, int *ok);
+static void mem_write16_raw(uint32_t addr, uint16_t value, uint8_t *mem, int *ok);
+
+// -------------------- CACHE  --------------------
 
 #define CACHE_SIZE_BYTES   256u
 #define CACHE_BLOCK_WORDS  4u
 #define CACHE_WORD_BYTES   4u
-#define CACHE_BLOCK_BYTES  (CACHE_BLOCK_WORDS * CACHE_WORD_BYTES) // 16
+#define CACHE_BLOCK_BYTES  16u
 #define CACHE_WAYS         2u
 #define CACHE_LINES        (CACHE_SIZE_BYTES / CACHE_BLOCK_BYTES) // 16
 #define CACHE_SETS         (CACHE_LINES / CACHE_WAYS)             // 8
@@ -77,12 +82,13 @@ static int uart_post_timer = 0;
 typedef struct {
     uint8_t  valid;
     uint32_t tag;
-    uint32_t data[CACHE_BLOCK_WORDS]; // 4 palavras
+    uint32_t data[CACHE_BLOCK_WORDS]; 
+    uint64_t last_access_time;
 } cache_line_t;
 
 typedef struct {
     cache_line_t way[CACHE_WAYS];
-    uint8_t lru; // para 2 vias: guarda qual via é a "LRU" (0 ou 1)
+    uint8_t lru; 
 } cache_set_t;
 
 typedef struct {
@@ -97,13 +103,15 @@ static inline int is_ram(uint32_t addr) {
     return (addr >= RAM_BASE && addr < RAM_BASE + RAM_SIZE);
 }
 
-// MMIO/fora da RAM: não entra na cache
 static inline int cacheable(uint32_t addr) {
-    return is_ram(addr);
+    if (addr >= IO_UART_BASE && addr < IO_UART_BASE + 0x1000) return 0;
+    if (addr >= 0x02000000u && addr < 0x0200FFFFu) return 0; // CLINT
+    if (addr >= 0x0C000000u && addr < 0x0C2FFFFFu) return 0; // PLIC
+    return 1;
 }
 
 static inline uint32_t block_base(uint32_t addr) { return addr & ~(CACHE_BLOCK_BYTES - 1u); }
-static inline uint32_t set_index(uint32_t addr)  { return (addr >> 4) & (CACHE_SETS - 1u); } // bits [6:4]
+static inline uint32_t set_index(uint32_t addr)  { return (addr >> 4) & (CACHE_SETS - 1u); } 
 static inline uint32_t tag_of(uint32_t addr)     { return addr >> 7; }
 static inline uint32_t word_index(uint32_t addr) { return (addr >> 2) & 3u; }
 
@@ -111,26 +119,32 @@ static void cache_reset(cache_t *c) {
     memset(c, 0, sizeof(*c));
 }
 
-static uint32_t cache_read32(cache_t *c,
-                             const char *name, // "i" ou "d" p/ log
-                             uint32_t addr,
-                             uint8_t *mem,
-                             FILE *output,
-                             int *ok)
-{
-    // Se não é cacheável (MMIO etc), bypass total
+static void cache_invalidate(cache_t *c, uint32_t addr) {
+    if (!cacheable(addr)) return;
+    
+    uint32_t si = set_index(addr);
+    uint32_t tg = tag_of(addr);
+    cache_set_t *S = &c->set[si];
+    
+    for (int w = 0; w < (int)CACHE_WAYS; w++) {
+        if (S->way[w].valid && S->way[w].tag == tg) {
+            S->way[w].valid = 0;
+        }
+    }
+}
+
+static uint32_t cache_read32(cache_t *c, const char *name, uint32_t addr, uint8_t *mem, FILE *output, int *ok) {
     if (!cacheable(addr)) {
         return mem_read32_raw(addr, mem, ok);
     }
 
     c->accesses++;
-
-    uint32_t si  = set_index(addr);
-    uint32_t tg  = tag_of(addr);
-    uint32_t wi  = word_index(addr);
-
+    uint32_t si = set_index(addr);
+    uint32_t tg = tag_of(addr);
+    uint32_t wi = word_index(addr);
     cache_set_t *S = &c->set[si];
 
+    // 1. Tentar encontrar HIT
     int hit_way = -1;
     for (int w = 0; w < (int)CACHE_WAYS; w++) {
         if (S->way[w].valid && S->way[w].tag == tg) {
@@ -141,104 +155,162 @@ static uint32_t cache_read32(cache_t *c,
 
     if (hit_way >= 0) {
         c->hits++;
-
-        // Atualiza LRU: a outra via vira a LRU
         S->lru = (uint8_t)(1 - hit_way);
+        S->way[hit_way].last_access_time = c->accesses;
 
-        uint32_t val = S->way[hit_way].data[wi];
-
-        // Log (ajusta formato se teu professor exigir algo específico)
-        fprintf(output, "#cache_%s:ir 0x%08x line=%u,way=%d,hit=1,tag=0x%08x\n",
-                name, addr, si, hit_way, tg);
-        fflush(output);
-
+        fprintf(output, "#cache_mem:%srh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
+                name, addr, si, tg, hit_way,
+                S->way[hit_way].data[0], S->way[hit_way].data[1],
+                S->way[hit_way].data[2], S->way[hit_way].data[3]);
+        //fflush(output);
         *ok = 1;
-        return val;
+        return S->way[hit_way].data[wi];
     }
 
-    // MISS: escolher vítima (primeiro inválido, senão LRU)
+    // 2. Processar MISS
+    uint32_t diff0 = S->way[0].valid ? (uint32_t)(c->accesses - S->way[0].last_access_time) : 0;
+    uint32_t age0  = (diff0 > 255) ? 255 : diff0;
+
+    uint32_t diff1 = S->way[1].valid ? (uint32_t)(c->accesses - S->way[1].last_access_time) : 0;
+    uint32_t age1  = (diff1 > 255) ? 255 : diff1;
+
+    fprintf(output, "#cache_mem:%srm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
+            name, addr, si,
+            S->way[0].valid, S->way[1].valid,
+            age0, age1,
+            S->way[0].tag,   S->way[1].tag);
+    //fflush(output);
+
+    // Selecionar vítima
     int victim = -1;
     for (int w = 0; w < (int)CACHE_WAYS; w++) {
         if (!S->way[w].valid) { victim = w; break; }
     }
     if (victim < 0) victim = S->lru;
 
-    // Refill do bloco
+    // Buscar bloco na memória
     uint32_t base = block_base(addr);
     int ok2 = 1;
     uint32_t block[CACHE_BLOCK_WORDS];
+    
     for (int i = 0; i < 4; i++) {
         block[i] = mem_read32_raw(base + 4u*(uint32_t)i, mem, &ok2);
-        if (!ok2) break;
+        if (!ok2) {
+            *ok = 0;
+            return 0;
+        }
     }
 
-    // Log miss
-    fprintf(output, "#cache_%s:ir 0x%08x line=%u,way=%d,hit=0,fill=0x%08x\n",
-            name, addr, si, victim, base);
-    fflush(output);
-
-    if (!ok2) {
-        *ok = 0;
-        return 0;
-    }
-
+    // Atualizar Cache 
     S->way[victim].valid = 1;
     S->way[victim].tag   = tg;
+    S->way[victim].last_access_time = c->accesses;
     for (int i = 0; i < 4; i++) S->way[victim].data[i] = block[i];
-
-    // Após usar victim, a outra via vira LRU
+    
+    // Atualizar LRU
     S->lru = (uint8_t)(1 - victim);
 
     *ok = 1;
     return S->way[victim].data[wi];
 }
 
-static void dcache_write32(uint32_t addr,
-                           uint32_t value,
-                           uint8_t *mem,
-                           FILE *output,
-                           int *ok)
-{
-    // 1) write-through: SEMPRE escreve na memória real
-    mem_write32_raw(addr, value, mem, ok);
-    if (!*ok) return;
-
-    // 2) não cacheia MMIO / fora da RAM
-    if (!cacheable(addr)) return;
-
-    // 3) contabiliza acesso na D-cache
+static void dcache_write8(uint32_t addr, uint8_t value, uint8_t *mem, FILE *output, int *ok) {
+    if (!cacheable(addr)) { mem_write8_raw(addr, value, mem, ok); return; }
     dcache.accesses++;
 
-    uint32_t si  = set_index(addr);
-    uint32_t tg  = tag_of(addr);
-    uint32_t wi  = word_index(addr);
+    mem_write8_raw(addr, value, mem, ok);
 
+    uint32_t si = set_index(addr);
+    uint32_t tg = tag_of(addr);
     cache_set_t *S = &dcache.set[si];
 
     int hit_way = -1;
     for (int w = 0; w < (int)CACHE_WAYS; w++) {
-        if (S->way[w].valid && S->way[w].tag == tg) {
-            hit_way = w;
-            break;
-        }
+        if (S->way[w].valid && S->way[w].tag == tg) { hit_way = w; break; }
     }
 
     if (hit_way >= 0) {
-        // HIT: atualiza a palavra dentro do bloco
         dcache.hits++;
-        S->way[hit_way].data[wi] = value;
-
-        // LRU: a outra via vira LRU
+        uint32_t base = block_base(addr);
+        for(int i=0; i<4; i++) {
+            int dummy; S->way[hit_way].data[i] = mem_read32_raw(base + i*4, mem, &dummy);
+        }
         S->lru = (uint8_t)(1 - hit_way);
-
-        fprintf(output, "#cache_d:dw 0x%08x line=%u,way=%d,hit=1\n",
-                addr, si, hit_way);
-        fflush(output);
+        S->way[hit_way].last_access_time = dcache.accesses;
+        
+        fprintf(output, "#cache_mem:dwh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
+                addr, si, tg, hit_way, S->way[hit_way].data[0], S->way[hit_way].data[1], S->way[hit_way].data[2], S->way[hit_way].data[3]);
     } else {
-        // MISS: no write allocate -> NÃO preenche bloco
-        fprintf(output, "#cache_d:dw 0x%08x line=%u,hit=0(no-alloc)\n",
-                addr, si);
-        fflush(output);
+        uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
+        uint32_t age1 = S->way[1].valid ? (uint32_t)(dcache.accesses - S->way[1].last_access_time) : 0;
+        fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
+                addr, si, S->way[0].valid, S->way[1].valid, age0, age1, S->way[0].tag, S->way[1].tag);
+    }
+}
+
+static void dcache_write16(uint32_t addr, uint16_t value, uint8_t *mem, FILE *output, int *ok) {
+    if (!cacheable(addr)) { mem_write16_raw(addr, value, mem, ok); return; }
+    dcache.accesses++;
+    mem_write16_raw(addr, value, mem, ok);
+
+    uint32_t si = set_index(addr);
+    uint32_t tg = tag_of(addr);
+    cache_set_t *S = &dcache.set[si];
+
+    int hit_way = -1;
+    for (int w = 0; w < (int)CACHE_WAYS; w++) {
+        if (S->way[w].valid && S->way[w].tag == tg) { hit_way = w; break; }
+    }
+
+    if (hit_way >= 0) {
+        dcache.hits++;
+        uint32_t base = block_base(addr);
+        for(int i=0; i<4; i++) {
+            int dummy; S->way[hit_way].data[i] = mem_read32_raw(base + i*4, mem, &dummy);
+        }
+        S->lru = (uint8_t)(1 - hit_way);
+        S->way[hit_way].last_access_time = dcache.accesses;
+        
+        fprintf(output, "#cache_mem:dwh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
+                addr, si, tg, hit_way, S->way[hit_way].data[0], S->way[hit_way].data[1], S->way[hit_way].data[2], S->way[hit_way].data[3]);
+    } else {
+        uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
+        uint32_t age1 = S->way[1].valid ? (uint32_t)(dcache.accesses - S->way[1].last_access_time) : 0;
+        fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
+                addr, si, S->way[0].valid, S->way[1].valid, age0, age1, S->way[0].tag, S->way[1].tag);
+    }
+}
+
+static void dcache_write32(uint32_t addr, uint32_t value, uint8_t *mem, FILE *output, int *ok) {
+    if (!cacheable(addr)) { mem_write32_raw(addr, value, mem, ok); return; }
+    dcache.accesses++;
+    mem_write32_raw(addr, value, mem, ok);
+
+    uint32_t si = set_index(addr);
+    uint32_t tg = tag_of(addr);
+    cache_set_t *S = &dcache.set[si];
+
+    int hit_way = -1;
+    for (int w = 0; w < (int)CACHE_WAYS; w++) {
+        if (S->way[w].valid && S->way[w].tag == tg) { hit_way = w; break; }
+    }
+
+    if (hit_way >= 0) {
+        dcache.hits++;
+        uint32_t base = block_base(addr);
+        for(int i=0; i<4; i++) {
+            int dummy; S->way[hit_way].data[i] = mem_read32_raw(base + i*4, mem, &dummy);
+        }
+        S->lru = (uint8_t)(1 - hit_way);
+        S->way[hit_way].last_access_time = dcache.accesses;
+        
+        fprintf(output, "#cache_mem:dwh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
+                addr, si, tg, hit_way, S->way[hit_way].data[0], S->way[hit_way].data[1], S->way[hit_way].data[2], S->way[hit_way].data[3]);
+    } else {
+        uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
+        uint32_t age1 = S->way[1].valid ? (uint32_t)(dcache.accesses - S->way[1].last_access_time) : 0;
+        fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
+                addr, si, S->way[0].valid, S->way[1].valid, age0, age1, S->way[0].tag, S->way[1].tag);
     }
 }
 
@@ -247,7 +319,9 @@ static void dcache_write32(uint32_t addr,
 enum {
     EXC_INST_FAULT       = 1,
     EXC_ILLEGAL_INST     = 2,
+    EXC_LOAD_MISALIGNED  = 4, 
     EXC_LOAD_FAULT       = 5,
+    EXC_STORE_MISALIGNED = 6, 
     EXC_STORE_FAULT      = 7,
     EXC_ENV_CALL_M       = 11,
 };
@@ -272,10 +346,13 @@ static uint8_t uart_fifo_pop(void) {
     if (uart_head == uart_tail) return 0;
     uint8_t val = uart_fifo[uart_tail];
     uart_tail = (uart_tail + 1) % 4096;
-    if (uart_head == uart_tail) {
-        uart_eos_left = 1;
-        uart_eos_deferred = 1;
-    }
+    
+    // if (uart_head == uart_tail) {
+    //    uart_eos_left = 1;
+    //    uart_eos_deferred = 1;
+    // }
+    // -------------------------
+    
     return val;
 }
 
@@ -292,6 +369,21 @@ static uint32_t csr_read(uint32_t addr) {
         case 0x343: return csr_mtval;
         case 0x304: return csr_mie;
         case 0x344: return csr_mip;
+        
+        case 0xC00: // cycle
+        case 0xC01: // time
+        case 0xB00: // mcycle
+        case 0xB02: // minstret
+            return (uint32_t)(mtime & 0xFFFFFFFF);
+            
+        case 0xC80: // cycleh
+        case 0xC81: // timeh
+        case 0xB80: // mcycleh
+        case 0xB82: // minstreth
+            
+            return (uint32_t)(mtime >> 32);
+        
+
         default:    return 0;
     }
 }
@@ -330,11 +422,13 @@ static void raise_exception(uint32_t cause,
 {
     const char *name = "unknown";
     switch (cause) {
-        case EXC_INST_FAULT:   name = "instruction_fault";   break;
-        case EXC_ILLEGAL_INST: name = "illegal_instruction"; break;
-        case EXC_LOAD_FAULT:   name = "load_fault";          break;
-        case EXC_STORE_FAULT:  name = "store_fault";         break;
-        case EXC_ENV_CALL_M:   name = "environment_call";    break;
+        case EXC_INST_FAULT:       name = "instruction_fault";        break;
+        case EXC_ILLEGAL_INST:     name = "illegal_instruction";      break;
+        case EXC_LOAD_MISALIGNED:  name = "load_address_misaligned";  break; 
+        case EXC_LOAD_FAULT:       name = "load_fault";               break;
+        case EXC_STORE_MISALIGNED: name = "store_address_misaligned"; break; 
+        case EXC_STORE_FAULT:      name = "store_fault";              break;
+        case EXC_ENV_CALL_M:       name = "environment_call";         break;
     }
 
     csr_mcause = cause;
@@ -344,19 +438,22 @@ static void raise_exception(uint32_t cause,
     uint32_t m   = csr_mstatus;
     uint32_t mie = (m >> 3) & 1u;
 
-    // MIE <- 0, MPIE <- MIE antigo, MPP <- 3
     m &= ~((1u << 3) | (1u << 7) | (3u << 11));
     m |= (mie << 7);
     m |= (3u  << 11);
     csr_mstatus = m;
 
     uint32_t base = csr_mtvec & ~0x3u;
+    if (base == 0 || !is_ram(base)) { 
+        fprintf(output, ">abort: exception jump to invalid mtvec 0x%08x\n", base);
+        exit(1); 
+    }
     *pc_next = base;
 
     fprintf(output,
         ">exception:%-26s cause=0x%08x,epc=0x%08x,tval=0x%08x\n",
         name, cause, epc, tval);
-    fflush(output);
+    //fflush(output);
 }
 
 static void raise_interrupt(uint32_t irq_cause,
@@ -381,7 +478,6 @@ static void raise_interrupt(uint32_t irq_cause,
     uint32_t m   = csr_mstatus;
     uint32_t mie = (m >> 3) & 1u;
 
-    // MIE <- 0, MPIE <- MIE antigo, MPP <- 3
     m &= ~((1u << 3) | (1u << 7) | (3u << 11));
     m |= (mie << 7);
     m |= (3u  << 11);
@@ -395,7 +491,7 @@ static void raise_interrupt(uint32_t irq_cause,
     fprintf(output,
         ">interrupt:%-26s cause=0x%08x,epc=0x%08x,tval=0x%08x\n",
         name, irq_cause, epc, tval);
-    fflush(output);
+    //fflush(output);
 }
 
 static inline const char* rname(int r) {
@@ -416,11 +512,11 @@ static void out2(FILE* output,
     int msg_empty = (!msg || msg[0] == '\0');
 
     if (ops_empty && msg_empty) {
-        fprintf(output, "0x%08x:%s\n", pc, mnem);
+        fprintf(output, "0x%08x:%-6s\n", pc, mnem);
     } else {
         fprintf(output, "0x%08x:%-6s %-19s %s\n", pc, mnem, ops, msg);
     }
-    fflush(output);
+    //fflush(output);
 }
 
 
@@ -428,24 +524,30 @@ static void out2(FILE* output,
 
 static uint8_t mem_read8_raw(uint32_t addr, uint8_t *mem, int *ok) {
     if (addr >= RAM_BASE && addr < RAM_BASE + RAM_SIZE) {
+        *ok = 1;
         return mem[addr - RAM_BASE];
     }
 
     // UART RX (pop do FIFO)
     if (addr == IO_UART_BASE + 0) {
+        *ok = 1;
         return uart_fifo_pop();
     }
 
+    // UART Status
     if (addr == IO_UART_BASE + 2) {
-        if (!uart_ready) return 0x01;
+        *ok = 1;
+        if (!uart_ready) return 0x00;
         if (uart_fifo_empty()) {
-            if (uart_eos_left > 0 || uart_post_timer) uart_eos_seen = 1;
-            return 0x01;
+            // if (uart_eos_left > 0 || uart_post_timer) uart_eos_seen = 1;
+            return 0x00; 
         }
-        return 0x04;
+        return 0x01;     
     }
 
+    // UART Line Status 
     if (addr == IO_UART_BASE + 5) {
+        *ok = 1; 
         return uart_fifo_empty() ? 0x60 : 0x61;
     }
 
@@ -463,31 +565,36 @@ static uint16_t mem_read16_raw(uint32_t addr, uint8_t *mem, int *ok) {
 
 static uint32_t mem_read32_raw(uint32_t addr, uint8_t *mem, int *ok) {
     // CLINT mtime 
-    if (addr == CLINT_MTIME_LO) return (uint32_t)(mtime & 0xFFFFFFFFu);
-    if (addr == CLINT_MTIME_HI) return (uint32_t)(mtime >> 32);
+    if (addr == CLINT_MTIME_LO) { *ok=1; return (uint32_t)(mtime & 0xFFFFFFFFu); }
+    if (addr == CLINT_MTIME_HI) { *ok=1; return (uint32_t)(mtime >> 32); }
 
     // mtimecmp 
-    if (addr == CLINT_MTIMECMP_LO) return (uint32_t)(mtimecmp & 0xFFFFFFFFu);
-    if (addr == CLINT_MTIMECMP_HI) return (uint32_t)(mtimecmp >> 32);
+    if (addr == CLINT_MTIMECMP_LO) { *ok=1; return (uint32_t)(mtimecmp & 0xFFFFFFFFu); }
+    if (addr == CLINT_MTIMECMP_HI) { *ok=1; return (uint32_t)(mtimecmp >> 32); }
 
     // ---------- PLIC (reads) ----------
     if (addr == PLIC_CLAIMCOMP) {
+        *ok = 1;
         return (csr_mip & (1u << 11)) ? 10u : 0u;
     }
 
     if (addr == PLIC_THRESHOLD) {
+        *ok = 1;
         return plic_threshold;
     }
 
     if (addr == PLIC_PRIORITY_10) {
+        *ok = 1;
         return plic_priority_10;
     }
 
     if (addr == PLIC_ENABLE_ADDR) {
+        *ok = 1;
         return plic_enable;
     }
 
     if (addr == 0x0c001000u) {
+        *ok = 1;
         return 0u;
     }
 
@@ -503,20 +610,25 @@ static void mem_write8_raw(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
 {
     if (addr >= RAM_BASE && addr < RAM_BASE + RAM_SIZE) {
         mem[addr - RAM_BASE] = value;
+        *ok = 1;
         return;
     }
 
     // UART TX 
     if (addr == IO_UART_BASE + 0) {
-        (void)value;
+        // uart_fifo_push(value); 
+        // if (uart_ready) plic_irq10_pending = 1; 
+        
+        putchar((char)value); 
+        
+        *ok = 1;
         return;
     }
 
     // UART config 
     if (addr == IO_UART_BASE + 1) {
         uart_ready = 1;
-        plic_irq10_pending = 1;
-        csr_mip |= (1u << 11);
+        *ok = 1;
         return;
     }
 
@@ -526,19 +638,15 @@ static void mem_write8_raw(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
             if (value != 0) csr_mip |=  (1u << 3);  // MSIP
             else {
                 csr_mip &= ~(1u << 3);
-                if (uart_eos_deferred) {
-                    uart_eos_left = 1;
-                    uart_eos_deferred = 0;
-                    plic_irq10_pending = 1;
-                    csr_mip |= (1u << 11);
-                }
             }
         }
+        *ok = 1;
         return;
     }
 
     // CLINT mtime 
     if (addr >= CLINT_MTIME_LO && addr < (CLINT_MTIME_HI + 4u)) {
+        *ok = 1;
         return;
     }
 
@@ -546,15 +654,16 @@ static void mem_write8_raw(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
 }
 
 static void mem_write16_raw(uint32_t addr, uint16_t value, uint8_t *mem, int *ok) {
-    mem_write8_raw(addr,     (uint8_t)( value       & 0xFF), mem, ok);
+    mem_write8_raw(addr,     (uint8_t)( value        & 0xFF), mem, ok);
     if (!*ok) return;
-    mem_write8_raw(addr + 1, (uint8_t)((value >> 8) & 0xFF), mem, ok);
+    mem_write8_raw(addr + 1, (uint8_t)((value >> 8)  & 0xFF), mem, ok);
 }
 
 static void mem_write32_raw(uint32_t addr, uint32_t value, uint8_t *mem, int *ok)
 {
     // CLINT mtime 
     if (addr == CLINT_MTIME_LO || addr == CLINT_MTIME_HI) {
+        *ok = 1;
         return; 
     }
 
@@ -562,39 +671,40 @@ static void mem_write32_raw(uint32_t addr, uint32_t value, uint8_t *mem, int *ok
     if (addr == CLINT_MTIMECMP_LO) {
         mtimecmp = (mtimecmp & 0xFFFFFFFF00000000ULL) | (uint64_t)value;
         if (mtime >= mtimecmp) csr_mip |=  (1u << 7); else csr_mip &= ~(1u << 7);
+        *ok = 1;
         return;
     }
     if (addr == CLINT_MTIMECMP_HI) {
         mtimecmp = (mtimecmp & 0x00000000FFFFFFFFULL) | ((uint64_t)value << 32);
         if (mtime >= mtimecmp) csr_mip |=  (1u << 7); else csr_mip &= ~(1u << 7);
+        *ok = 1;
         return;
     }
 
     // ---------- PLIC (writes) ----------
     if (addr == PLIC_PRIORITY_10) {
         plic_priority_10 = value;
+        *ok = 1;
         return;
     }
 
     if (addr == PLIC_ENABLE_ADDR) {
         plic_enable = value;
+        *ok = 1;
         return;
     }
 
     if (addr == PLIC_THRESHOLD) {
         plic_threshold = value;
+        *ok = 1;
         return;
     }
 
     if (addr == PLIC_CLAIMCOMP) {
         if (value == 10u) {
             plic_irq10_pending = 0;
-            if (uart_eos_seen) {
-                if (uart_eos_left > 0) uart_eos_left--;
-                uart_post_timer = 0;
-                uart_eos_seen = 0;
-            }
         }
+        *ok = 1;
         return;
     }
 
@@ -622,7 +732,10 @@ int main(int argc, char* argv[]) {
         perror("erro abrindo arquivo de saída");
         fclose(input);
         return 1;
+
     }
+    static char output_buffer[65536];
+    setvbuf(output, output_buffer, _IOFBF, sizeof(output_buffer));
 
     uint8_t* mem = (uint8_t*)malloc(RAM_SIZE);
     if (!mem) { fclose(input); fclose(output); return 1; }
@@ -631,17 +744,15 @@ int main(int argc, char* argv[]) {
     cache_reset(&icache);
     cache_reset(&dcache);
 
+    mtime = 0;
+    mtimecmp = 0xFFFFFFFFFFFFFFFFULL;
+    uart_ready = 1;
 
     uint32_t x[32] = {0};
     uint32_t pc = RAM_BASE;
 
-    const char *banner =
-        "           __  ___\n"
-        "|  |  /\\  |__)  |\n"
-        "\\__/ /--\\ |  \\  |\n"
-        "\n"
-        ;
-    for (const char *p = banner; *p; ++p) uart_fifo_push((uint8_t)*p);
+    //const char *banner = "Poxim-V server 0.1\n";
+    //for (const char *p = banner; *p; ++p) uart_fifo_push((uint8_t)*p);
 
     // Loader
     {
@@ -672,9 +783,9 @@ int main(int argc, char* argv[]) {
 
     while (running) {
 
-        if (++steps > 2000000ULL) {
+        if (++steps > 500000ULL) {
             fprintf(output, ">abort: step limit\n");
-            fflush(output);
+            //fflush(output);
             break;
         }
 
@@ -987,50 +1098,33 @@ int main(int argc, char* argv[]) {
                 uint32_t addr = x[rs1] + imm12;
                 int ok2 = 1;
 
-                if (funct3 == 0b000) { // LB
-                    int8_t b = (int8_t)mem_read8_raw(addr, mem, &ok2);
-                    if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = (int32_t)b;
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lb", ops, msg);
+                // 1. Aciona a Cache apenas para gerar o log exigido e atualizar o Hit Rate
+                if (cacheable(addr)) {
+                    int dummy;
+                    cache_read32(&dcache, "d", addr, mem, output, &dummy);
+                }
+
+                // 2. Extrai os bytes perfeitamente direto da RAM (suporta desalinhamento nativo!)
+                const char *mnem = "load";
+                if (funct3 == 0b000) {      // LB
+                    x[rd] = (int32_t)(int8_t)mem_read8_raw(addr, mem, &ok2);
+                    mnem = "lb";
                 }
                 else if (funct3 == 0b001) { // LH
-                    int16_t h = (int16_t)mem_read16_raw(addr, mem, &ok2);
-                    if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = (int32_t)h;
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lh", ops, msg);
+                    x[rd] = (int32_t)(int16_t)mem_read16_raw(addr, mem, &ok2);
+                    mnem = "lh";
                 }
                 else if (funct3 == 0b010) { // LW
-                    uint32_t w = cache_read32(&dcache, "d", addr, mem, output, &ok2);
-                    if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = w;
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lw", ops, msg);
+                    x[rd] = mem_read32_raw(addr, mem, &ok2);
+                    mnem = "lw";
                 }
                 else if (funct3 == 0b100) { // LBU
-                    uint8_t b = mem_read8_raw(addr, mem, &ok2);
-                    if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = (uint32_t)b;
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lbu", ops, msg);
+                    x[rd] = (uint32_t)mem_read8_raw(addr, mem, &ok2);
+                    mnem = "lbu";
                 }
                 else if (funct3 == 0b101) { // LHU
-                    uint16_t h = mem_read16_raw(addr, mem, &ok2);
-                    if (!ok2) { raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); goto end_of_loop; }
-                    x[rd] = (uint32_t)h;
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lhu", ops, msg);
+                    x[rd] = (uint32_t)mem_read16_raw(addr, mem, &ok2);
+                    mnem = "lhu";
                 }
                 else {
                     uint32_t pc_exc = pc_curr + 4;
@@ -1038,6 +1132,17 @@ int main(int argc, char* argv[]) {
                     pc_next = pc_exc;
                     goto end_of_loop;
                 }
+                
+                if (!ok2) { 
+                    raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); 
+                    goto end_of_loop; 
+                }
+
+                // Imprime a linha do registrador na saída
+                char ops[32], msg[128];
+                snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
+                snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
+                out2(output, pc_curr, mnem, ops, msg);
                 break;
             }
 
@@ -1051,9 +1156,13 @@ int main(int argc, char* argv[]) {
                 uint32_t addr = x[rs1] + immS;
                 int ok2 = 1;
 
+                
+
                 if (funct3 == 0b000) { // SB
                     uint8_t b = (uint8_t)(x[rs2] & 0xFF);
-                    mem_write8_raw(addr, b, mem, &ok2);
+                    
+                    dcache_write8(addr, b, mem, output, &ok2);
+                    
                     if (!ok2) {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
@@ -1067,7 +1176,9 @@ int main(int argc, char* argv[]) {
                 }
                 else if (funct3 == 0b001) { // SH
                     uint16_t h = (uint16_t)(x[rs2] & 0xFFFF);
-                    mem_write16_raw(addr, h, mem, &ok2);
+
+                    dcache_write16(addr, h, mem, output, &ok2);
+
                     if (!ok2) {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
@@ -1082,6 +1193,7 @@ int main(int argc, char* argv[]) {
                 else if (funct3 == 0b010) { // SW
                     uint32_t w = x[rs2];
                     dcache_write32(addr, w, mem, output, &ok2);
+                    
                     if (!ok2) {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_STORE_FAULT, pc_curr, addr, &pc_exc, output);
@@ -1117,8 +1229,10 @@ int main(int argc, char* argv[]) {
                 uint32_t target = pc_curr + immB;
                 uint32_t shown_off = (imm13u >> 1) & 0xFFF;
 
+                int taken = 0;
+
                 if (funct3 == 0b000) { // BEQ
-                    int taken = (x[rs1] == x[rs2]);
+                    taken = (x[rs1] == x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
                     if (taken) pc_next = target;
                     char ops[32], msg[128];
@@ -1128,7 +1242,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "beq", ops, msg);
                 }
                 else if (funct3 == 0b001) { // BNE
-                    int taken = (x[rs1] != x[rs2]);
+                    taken = (x[rs1] != x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
                     if (taken) pc_next = target;
                     char ops[32], msg[128];
@@ -1138,7 +1252,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "bne", ops, msg);
                 }
                 else if (funct3 == 0b100) { // BLT
-                    int taken = ((int32_t)x[rs1] < (int32_t)x[rs2]);
+                    taken = ((int32_t)x[rs1] < (int32_t)x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
                     if (taken) pc_next = target;
                     char ops[32], msg[128];
@@ -1148,7 +1262,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "blt", ops, msg);
                 }
                 else if (funct3 == 0b101) { // BGE
-                    int taken = ((int32_t)x[rs1] >= (int32_t)x[rs2]);
+                    taken = ((int32_t)x[rs1] >= (int32_t)x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
                     if (taken) pc_next = target;
                     char ops[32], msg[128];
@@ -1158,7 +1272,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "bge", ops, msg);
                 }
                 else if (funct3 == 0b110) { // BLTU
-                    int taken = (x[rs1] < x[rs2]);
+                    taken = (x[rs1] < x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
                     if (taken) pc_next = target;
                     char ops[32], msg[128];
@@ -1168,7 +1282,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "bltu", ops, msg);
                 }
                 else if (funct3 == 0b111) { // BGEU
-                    int taken = (x[rs1] >= x[rs2]);
+                    taken = (x[rs1] >= x[rs2]);
                     uint32_t newpc = taken ? target : (pc_curr + 4);
                     if (taken) pc_next = target;
                     char ops[32], msg[128];
@@ -1182,6 +1296,10 @@ int main(int argc, char* argv[]) {
                     raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
                     pc_next = pc_exc;
                     goto end_of_loop;
+                }
+                if (taken && target == pc_curr) {
+                    fprintf(output, ">halt: branch infinite loop detected at 0x%08x\n", pc_curr);
+                    running = 0; 
                 }
                 break;
             }
@@ -1230,6 +1348,11 @@ int main(int argc, char* argv[]) {
                 snprintf(msg, sizeof(msg), "pc=0x%08x,%s=0x%08x", target, rname(rd), ret);
                 out2(output, pc_curr, "jal", ops, msg);
 
+                if (target == pc_curr) {
+                    fprintf(output, ">halt: infinite loop detected at 0x%08x\n", pc_curr);
+                    running = 0; 
+                }
+
                 pc_next = target;
                 break;
             }
@@ -1269,8 +1392,23 @@ int main(int argc, char* argv[]) {
                         pc_next = pc_next_exc;
                     }
                     else if (imm_sys == 0x001) {     // EBREAK
-                        out2(output, pc_curr, "ebreak", "", "");
-                        running = 0;
+                        char ops[32] = "", msg[128] = "";
+                        out2(output, pc_curr, "ebreak", ops, msg);
+                        
+                        int dummy;
+                        cache_read32(&icache, "i", pc_curr - 4, mem, output, &dummy);
+                        cache_read32(&icache, "i", pc_curr + 4, mem, output, &dummy);
+                        
+                        running = 0; 
+                    }
+                    else if (imm_sys == 0x105) {     // WFI
+                        out2(output, pc_curr, "wfi", "", "");
+                        
+                        uint32_t timer_mie  = (csr_mie >> 7) & 1;
+                        
+                        if (timer_mie && mtime < mtimecmp && mtimecmp != -1ULL) {
+                            mtime = mtimecmp; 
+                        }
                     }
                     else if (imm_sys == 0x302) {     // MRET
                         pc_next = csr_mepc;
@@ -1333,6 +1471,58 @@ int main(int argc, char* argv[]) {
                                  csrnm, rname(rs1), old, rs1_val, new_csr);
                         out2(output, pc_curr, "csrrs", ops, msg);
                     }
+                    else if (funct3 == 0b011) { // CSRRC
+                    uint32_t rs1_val = x[rs1];
+                    uint32_t new_csr = old;
+                    if (rs1 != 0) {
+                        new_csr = old & ~rs1_val;
+                        csr_write(csr_addr, new_csr);
+                    }
+                    if (rd != 0) x[rd] = old;
+                    char ops[32], msg[160];
+                    snprintf(ops, sizeof(ops), "%s,%s,%s", rname(rd), csrnm, rname(rs1));
+                    snprintf(msg, sizeof(msg), "%s=%s=0x%08x,%s&=(~%s)=0x%08x&(~0x%08x)=0x%08x",
+                             rname(rd), csrnm, old, csrnm, rname(rs1), old, rs1_val, new_csr);
+                    out2(output, pc_curr, "csrrc", ops, msg);
+                }
+                else if (funct3 == 0b101) { // CSRRWI
+                    uint32_t zimm = rs1; 
+                    if (rd != 0) x[rd] = old;
+                    csr_write(csr_addr, zimm);
+                    char ops[32], msg[96];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%02x", rname(rd), csrnm, zimm);
+                    snprintf(msg, sizeof(msg), "%s=%s=0x%08x,%s=0x%08x",
+                             rname(rd), csrnm, old, csrnm, zimm);
+                    out2(output, pc_curr, "csrrwi", ops, msg);
+                }
+                else if (funct3 == 0b110) { // CSRRSI
+                    uint32_t zimm = rs1;
+                    uint32_t new_csr = old;
+                    if (zimm != 0) {
+                        new_csr = old | zimm;
+                        csr_write(csr_addr, new_csr);
+                    }
+                    if (rd != 0) x[rd] = old;
+                    char ops[32], msg[160];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%02x", rname(rd), csrnm, zimm);
+                    snprintf(msg, sizeof(msg), "%s=%s=0x%08x,%s|=0x%08x=0x%08x",
+                             rname(rd), csrnm, old, csrnm, zimm, new_csr);
+                    out2(output, pc_curr, "csrrsi", ops, msg);
+                }
+                else if (funct3 == 0b111) { // CSRRCI
+                    uint32_t zimm = rs1;
+                    uint32_t new_csr = old;
+                    if (zimm != 0) {
+                        new_csr = old & ~zimm;
+                        csr_write(csr_addr, new_csr);
+                    }
+                    if (rd != 0) x[rd] = old;
+                    char ops[32], msg[160];
+                    snprintf(ops, sizeof(ops), "%s,%s,0x%02x", rname(rd), csrnm, zimm);
+                    snprintf(msg, sizeof(msg), "%s=%s=0x%08x,%s&=(~0x%08x)=0x%08x",
+                             rname(rd), csrnm, old, csrnm, zimm, new_csr);
+                    out2(output, pc_curr, "csrrci", ops, msg);
+                }
                     else {
                         uint32_t pc_exc = pc_curr + 4;
                         raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
@@ -1342,7 +1532,20 @@ int main(int argc, char* argv[]) {
                 }
                 break;
             }
-
+            // -------- FENCE / FENCE.I --------
+            case 0b0001111: {
+                if (funct3 == 0b001) { // FENCE.I
+                    out2(output, pc_curr, "fence.i", "", "");
+                    for (int i = 0; i < CACHE_SETS; i++) {
+                        icache.set[i].way[0].valid = 0;
+                        icache.set[i].way[1].valid = 0;
+                        icache.set[i].lru = 0; 
+                    }
+                } else {
+                    out2(output, pc_curr, "fence", "", "");
+                }
+                break;
+            }
             default: {
                 uint32_t pc_exc = pc_curr + 4;
                 raise_exception(EXC_ILLEGAL_INST, pc_curr, instruction, &pc_exc, output);
@@ -1355,60 +1558,72 @@ end_of_loop:
         // x0 é sempre zero
         x[0] = 0;
 
-        mtime++;
-        timer_irq_pending = (mtime >= mtimecmp);
-        if (timer_irq_pending) csr_mip |=  (1u << 7);
+        mtime += 500; 
+
+        // Timer Check 
+        if (mtime >= mtimecmp) csr_mip |=  (1u << 7);
         else                   csr_mip &= ~(1u << 7);
 
-if (uart_ready && (!uart_fifo_empty() || uart_eos_left > 0 || uart_post_timer)) plic_irq10_pending = 1;
-if (plic_irq10_pending) csr_mip |=  (1u << 11);
-else                   csr_mip &= ~(1u << 11);
+        // UART Check 
+        if (uart_ready && !uart_fifo_empty()) {
+             plic_irq10_pending = 1;
+        } else {
+             plic_irq10_pending = 0; 
+        }
+        
+        int plic_uart_enabled = (plic_enable & (1u << 10));
+        int plic_priority_ok  = (plic_priority_10 > plic_threshold);
+
+        if (plic_irq10_pending && plic_uart_enabled && plic_priority_ok) {
+            csr_mip |=  (1u << 11); // Liga MEIP
+        } else {
+            csr_mip &= ~(1u << 11); // Desliga MEIP
+        }
+
 
         uint32_t global_mie = (csr_mstatus & (1u << 3));
 
         if (global_mie) {
-            if ((csr_mip & (1u << 11)) && (csr_mie & (1u << 11))) { // MEIP
-                uint32_t irq_cause = 0x8000000Bu;
-                uint32_t epc = pc_next;
-                raise_interrupt(irq_cause, epc, 0, &pc_next, output);
-            }
-            else if ((csr_mip & (1u << 3)) && (csr_mie & (1u << 3))) { // MSIP
-                uint32_t irq_cause = 0x80000003u;
-                uint32_t epc = pc_next;
-                raise_interrupt(irq_cause, epc, 0, &pc_next, output);
+            uint32_t pending_irqs = csr_mip & csr_mie;
 
-                soft_irq_pending = 0;
-                csr_mip &= ~(1u << 3);
-            }
-            else if ((csr_mip & (1u << 7)) && (csr_mie & (1u << 7))) { // MTIP
-                if (uart_ready && uart_fifo_empty()) uart_post_timer = 1;
-                uint32_t irq_cause = 0x80000007u;
-                uint32_t epc = pc_next;
-                raise_interrupt(irq_cause, epc, 0, &pc_next, output);
+            if (pending_irqs) {
+                
+                uint32_t cause = 0;
+                int take = 0;
 
-                timer_irq_pending = 0;
-                csr_mip &= ~(1u << 7);
+                if (pending_irqs & (1u << 11)) { // MEIP
+                    cause = 0x8000000Bu;
+                    take = 1;
+                }
+                else if (pending_irqs & (1u << 3)) { // MSIP
+                    cause = 0x80000003u;
+                    take = 1;
+                    soft_irq_pending = 0;
+                    //csr_mip &= ~(1u << 3);
+                }
+                else if (pending_irqs & (1u << 7)) { // MTIP
+                    cause = 0x80000007u;
+                    take = 1;
+                    timer_irq_pending = 0;
+                    //csr_mip &= ~(1u << 7);
+                }
+
+                if (take) {
+                    raise_interrupt(cause, pc_next, 0, &pc_next, output);
+                }
             }
         }
 
         pc = pc_next;
     }
 
-    double ih = (icache.accesses ? (100.0 * (double)icache.hits / (double)icache.accesses) : 0.0);
-    double dh = (dcache.accesses ? (100.0 * (double)dcache.hits / (double)dcache.accesses) : 0.0);
+    double ih = (icache.accesses ? ((double)icache.hits / (double)icache.accesses) : 0.0);
+    double dh = (dcache.accesses ? ((double)dcache.hits / (double)dcache.accesses) : 0.0);
 
-    fprintf(output, "#cache_i:stats hits=%llu accesses=%llu hit%%=%.4f\n",
-            (unsigned long long)icache.hits,
-            (unsigned long long)icache.accesses,
-            ih);
-
-    fprintf(output, "#cache_d:stats hits=%llu accesses=%llu hit%%=%.4f\n",
-            (unsigned long long)dcache.hits,
-            (unsigned long long)dcache.accesses,
-            dh);
+    fprintf(output, "#cache_mem:dstats                     hit=%.4f\n", dh);
+    fprintf(output, "#cache_mem:istats                     hit=%.4f\n", ih);
 
     fflush(output);
-
 
     fclose(input);
     fclose(output);
