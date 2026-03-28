@@ -215,7 +215,6 @@ static uint32_t cache_read32(cache_t *c, const char *name, uint32_t addr, uint8_
 }
 
 static void dcache_write8(uint32_t addr, uint8_t value, uint8_t *mem, FILE *output, int *ok) {
-<<<<<<< HEAD
     if (!cacheable(addr)) { mem_write8_raw(addr, value, mem, ok); return; }
     dcache.accesses++;
 
@@ -223,50 +222,23 @@ static void dcache_write8(uint32_t addr, uint8_t value, uint8_t *mem, FILE *outp
 
     uint32_t si = set_index(addr);
     uint32_t tg = tag_of(addr);
-=======
-    if (!cacheable(addr)) {
-        mem_write8_raw(addr, value, mem, ok);
-        return;
-    }
-    dcache.accesses++;
-
-    uint32_t si = set_index(addr);
-    uint32_t tg = tag_of(addr);
-    uint32_t wi = word_index(addr);
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     cache_set_t *S = &dcache.set[si];
 
     int hit_way = -1;
     for (int w = 0; w < (int)CACHE_WAYS; w++) {
-<<<<<<< HEAD
         if (S->way[w].valid && S->way[w].tag == tg) { hit_way = w; break; }
-=======
-        if (S->way[w].valid && S->way[w].tag == tg) {
-            hit_way = w;
-            break;
-        }
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     }
 
     if (hit_way >= 0) {
         dcache.hits++;
-<<<<<<< HEAD
         uint32_t base = block_base(addr);
         for(int i=0; i<4; i++) {
             int dummy; S->way[hit_way].data[i] = mem_read32_raw(base + i*4, mem, &dummy);
         }
-=======
-        uint32_t shift = (addr & 3u) * 8u;
-        uint32_t mask  = ~(0xFFu << shift);
-        uint32_t old_word = S->way[hit_way].data[wi];
-        S->way[hit_way].data[wi] = (old_word & mask) | ((uint32_t)value << shift);
-
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
         S->lru = (uint8_t)(1 - hit_way);
         S->way[hit_way].last_access_time = dcache.accesses;
         
         fprintf(output, "#cache_mem:dwh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
-<<<<<<< HEAD
                 addr, si, tg, hit_way, S->way[hit_way].data[0], S->way[hit_way].data[1], S->way[hit_way].data[2], S->way[hit_way].data[3]);
     } else {
         uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
@@ -283,70 +255,23 @@ static void dcache_write16(uint32_t addr, uint16_t value, uint8_t *mem, FILE *ou
 
     uint32_t si = set_index(addr);
     uint32_t tg = tag_of(addr);
-=======
-                addr, si, tg, hit_way,
-                S->way[hit_way].data[0], S->way[hit_way].data[1],
-                S->way[hit_way].data[2], S->way[hit_way].data[3]);
-        //fflush(output);
-    } else {
-        uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
-        uint32_t age1 = S->way[1].valid ? (uint32_t)(dcache.accesses - S->way[1].last_access_time) : 0;
-
-        fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
-                addr, si,
-                S->way[0].valid, S->way[1].valid,
-                age0, age1,
-                S->way[0].tag,   S->way[1].tag);
-        //fflush(output);
-    }
-
-    mem_write8_raw(addr, value, mem, ok);
-}
-
-static void dcache_write16(uint32_t addr, uint16_t value, uint8_t *mem, FILE *output, int *ok) {
-    if (!cacheable(addr)) {
-        mem_write16_raw(addr, value, mem, ok);
-        return;
-    }
-    dcache.accesses++;
-
-    uint32_t si = set_index(addr);
-    uint32_t tg = tag_of(addr);
-    uint32_t wi = word_index(addr);
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     cache_set_t *S = &dcache.set[si];
 
     int hit_way = -1;
     for (int w = 0; w < (int)CACHE_WAYS; w++) {
-<<<<<<< HEAD
         if (S->way[w].valid && S->way[w].tag == tg) { hit_way = w; break; }
-=======
-        if (S->way[w].valid && S->way[w].tag == tg) {
-            hit_way = w;
-            break;
-        }
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     }
 
     if (hit_way >= 0) {
         dcache.hits++;
-<<<<<<< HEAD
         uint32_t base = block_base(addr);
         for(int i=0; i<4; i++) {
             int dummy; S->way[hit_way].data[i] = mem_read32_raw(base + i*4, mem, &dummy);
         }
-=======
-        uint32_t shift = (addr & 2u) * 8u;
-        uint32_t mask  = ~(0xFFFFu << shift);
-        uint32_t old_word = S->way[hit_way].data[wi];
-        S->way[hit_way].data[wi] = (old_word & mask) | ((uint32_t)value << shift);
-
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
         S->lru = (uint8_t)(1 - hit_way);
         S->way[hit_way].last_access_time = dcache.accesses;
         
         fprintf(output, "#cache_mem:dwh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
-<<<<<<< HEAD
                 addr, si, tg, hit_way, S->way[hit_way].data[0], S->way[hit_way].data[1], S->way[hit_way].data[2], S->way[hit_way].data[3]);
     } else {
         uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
@@ -363,66 +288,23 @@ static void dcache_write32(uint32_t addr, uint32_t value, uint8_t *mem, FILE *ou
 
     uint32_t si = set_index(addr);
     uint32_t tg = tag_of(addr);
-=======
-                addr, si, tg, hit_way,
-                S->way[hit_way].data[0], S->way[hit_way].data[1],
-                S->way[hit_way].data[2], S->way[hit_way].data[3]);
-        //fflush(output);
-    } else {
-        uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
-        uint32_t age1 = S->way[1].valid ? (uint32_t)(dcache.accesses - S->way[1].last_access_time) : 0;
-
-        fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
-                addr, si,
-                S->way[0].valid, S->way[1].valid,
-                age0, age1,
-                S->way[0].tag,   S->way[1].tag);
-        //fflush(output);
-    }
-
-    mem_write16_raw(addr, value, mem, ok);
-}
-
-static void dcache_write32(uint32_t addr, uint32_t value, uint8_t *mem, FILE *output, int *ok) {
-    if (!cacheable(addr)) {
-        mem_write32_raw(addr, value, mem, ok);
-        return;
-    }
-    dcache.accesses++;
-
-    uint32_t si = set_index(addr);
-    uint32_t tg = tag_of(addr);
-    uint32_t wi = word_index(addr);
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     cache_set_t *S = &dcache.set[si];
 
     int hit_way = -1;
     for (int w = 0; w < (int)CACHE_WAYS; w++) {
-<<<<<<< HEAD
         if (S->way[w].valid && S->way[w].tag == tg) { hit_way = w; break; }
-=======
-        if (S->way[w].valid && S->way[w].tag == tg) {
-            hit_way = w;
-            break;
-        }
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     }
 
     if (hit_way >= 0) {
         dcache.hits++;
-<<<<<<< HEAD
         uint32_t base = block_base(addr);
         for(int i=0; i<4; i++) {
             int dummy; S->way[hit_way].data[i] = mem_read32_raw(base + i*4, mem, &dummy);
         }
-=======
-        S->way[hit_way].data[wi] = value;
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
         S->lru = (uint8_t)(1 - hit_way);
         S->way[hit_way].last_access_time = dcache.accesses;
         
         fprintf(output, "#cache_mem:dwh    0x%08x          line=%u,age=0,id=0x%07x,block[%d]={0x%08x,0x%08x,0x%08x,0x%08x}\n",
-<<<<<<< HEAD
                 addr, si, tg, hit_way, S->way[hit_way].data[0], S->way[hit_way].data[1], S->way[hit_way].data[2], S->way[hit_way].data[3]);
     } else {
         uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
@@ -430,25 +312,6 @@ static void dcache_write32(uint32_t addr, uint32_t value, uint8_t *mem, FILE *ou
         fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
                 addr, si, S->way[0].valid, S->way[1].valid, age0, age1, S->way[0].tag, S->way[1].tag);
     }
-=======
-                addr, si, tg, hit_way,
-                S->way[hit_way].data[0], S->way[hit_way].data[1],
-                S->way[hit_way].data[2], S->way[hit_way].data[3]);
-        //fflush(output);
-    } else {
-        uint32_t age0 = S->way[0].valid ? (uint32_t)(dcache.accesses - S->way[0].last_access_time) : 0;
-        uint32_t age1 = S->way[1].valid ? (uint32_t)(dcache.accesses - S->way[1].last_access_time) : 0;
-        
-        fprintf(output, "#cache_mem:dwm    0x%08x          line=%u,valid={%d,%d},age={%u,%u},id={0x%07x,0x%07x}\n",
-                addr, si,
-                S->way[0].valid, S->way[1].valid,
-                age0, age1,
-                S->way[0].tag,   S->way[1].tag);
-        //fflush(output);
-    }
-
-    mem_write32_raw(addr, value, mem, ok);
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
 }
 
 
@@ -753,19 +616,9 @@ static void mem_write8_raw(uint32_t addr, uint8_t value, uint8_t *mem, int *ok)
 
     // UART TX 
     if (addr == IO_UART_BASE + 0) {
-<<<<<<< HEAD
         // uart_fifo_push(value); 
         // if (uart_ready) plic_irq10_pending = 1; 
         
-=======
-        // --- CÓDIGO ANTIGO (CAUSA O LOOP INFINITO) ---
-        // uart_fifo_push(value); 
-        // if (uart_ready) plic_irq10_pending = 1; 
-        
-        // --- NOVO CÓDIGO (CORRETO) ---
-        // Apenas imprime no terminal real para você ver o que está acontecendo
-        // ou pode deixar vazio se não quiser output no terminal.
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
         putchar((char)value); 
         
         *ok = 1;
@@ -891,10 +744,6 @@ int main(int argc, char* argv[]) {
     cache_reset(&icache);
     cache_reset(&dcache);
 
-<<<<<<< HEAD
-=======
-    // INICIALIZAÇÃO EXPLÍCITA
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
     mtime = 0;
     mtimecmp = 0xFFFFFFFFFFFFFFFFULL;
     uart_ready = 1;
@@ -1249,7 +1098,6 @@ int main(int argc, char* argv[]) {
                 uint32_t addr = x[rs1] + imm12;
                 int ok2 = 1;
 
-<<<<<<< HEAD
                 // 1. Aciona a Cache apenas para gerar o log exigido e atualizar o Hit Rate
                 if (cacheable(addr)) {
                     int dummy;
@@ -1277,88 +1125,6 @@ int main(int argc, char* argv[]) {
                 else if (funct3 == 0b101) { // LHU
                     x[rd] = (uint32_t)mem_read16_raw(addr, mem, &ok2);
                     mnem = "lhu";
-=======
-                if (!cacheable(addr)) {
-                    const char *mnem = "load";
-                    if (funct3 == 0b000) {      // LB
-                        x[rd] = (int32_t)(int8_t)mem_read8_raw(addr, mem, &ok2);
-                        mnem = "lb";
-                    }
-                    else if (funct3 == 0b001) { // LH
-                        x[rd] = (int32_t)(int16_t)mem_read16_raw(addr, mem, &ok2);
-                        mnem = "lh";
-                    }
-                    else if (funct3 == 0b010) { // LW
-                        x[rd] = mem_read32_raw(addr, mem, &ok2);
-                        mnem = "lw";
-                    }
-                    else if (funct3 == 0b100) { // LBU
-                        x[rd] = (uint32_t)mem_read8_raw(addr, mem, &ok2);
-                        mnem = "lbu";
-                    }
-                    else if (funct3 == 0b101) { // LHU
-                        x[rd] = (uint32_t)mem_read16_raw(addr, mem, &ok2);
-                        mnem = "lhu";
-                    }
-                    
-                    if (!ok2) { 
-                        raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); 
-                        goto end_of_loop; 
-                    }
-
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, mnem, ops, msg);
-                    break; 
-                }
-
-                // Aciona a cache para contar hits e imprimir o log exigido pelo professor
-                uint32_t word = cache_read32(&dcache, "d", addr, mem, output, &ok2);
-                if (!ok2) { 
-                    raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); 
-                    goto end_of_loop; 
-                }
-
-                // O SEGREDO: Pega o valor real diretamente da RAM costurado byte a byte
-                // Isso elimina o bug de ler meias-palavras cortadas pela cache!
-                uint32_t safe_val = mem_read32_raw(addr, mem, &ok2);
-
-                if (funct3 == 0b000) { // LB
-                    x[rd] = (int32_t)(int8_t)(safe_val & 0xFF);
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lb", ops, msg);
-                }
-                else if (funct3 == 0b001) { // LH
-                    x[rd] = (int32_t)(int16_t)(safe_val & 0xFFFF);
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lh", ops, msg);
-                }
-                else if (funct3 == 0b010) { // LW
-                    x[rd] = safe_val;
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lw", ops, msg);
-                }
-                else if (funct3 == 0b100) { // LBU
-                    x[rd] = (uint32_t)(safe_val & 0xFF);
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lbu", ops, msg);
-                }
-                else if (funct3 == 0b101) { // LHU
-                    x[rd] = (uint32_t)(safe_val & 0xFFFF);
-                    char ops[32], msg[128];
-                    snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
-                    snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
-                    out2(output, pc_curr, "lhu", ops, msg);
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
                 }
                 else {
                     uint32_t pc_exc = pc_curr + 4;
@@ -1366,7 +1132,6 @@ int main(int argc, char* argv[]) {
                     pc_next = pc_exc;
                     goto end_of_loop;
                 }
-<<<<<<< HEAD
                 
                 if (!ok2) { 
                     raise_exception(EXC_LOAD_FAULT, pc_curr, addr, &pc_next, output); 
@@ -1378,8 +1143,6 @@ int main(int argc, char* argv[]) {
                 snprintf(ops, sizeof(ops), "%s,0x%03x(%s)", rname(rd), (uint32_t)(imm12 & 0xFFF), rname(rs1));
                 snprintf(msg, sizeof(msg), "%s=mem[0x%08x]=0x%08x", rname(rd), addr, x[rd]);
                 out2(output, pc_curr, mnem, ops, msg);
-=======
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
                 break;
             }
 
@@ -1629,7 +1392,6 @@ int main(int argc, char* argv[]) {
                         pc_next = pc_next_exc;
                     }
                     else if (imm_sys == 0x001) {     // EBREAK
-<<<<<<< HEAD
                         char ops[32] = "", msg[128] = "";
                         out2(output, pc_curr, "ebreak", ops, msg);
                         
@@ -1637,26 +1399,15 @@ int main(int argc, char* argv[]) {
                         cache_read32(&icache, "i", pc_curr - 4, mem, output, &dummy);
                         cache_read32(&icache, "i", pc_curr + 4, mem, output, &dummy);
                         
-=======
-                        out2(output, pc_curr, "ebreak", "", "");
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
                         running = 0; 
                     }
                     else if (imm_sys == 0x105) {     // WFI
                         out2(output, pc_curr, "wfi", "", "");
                         
-<<<<<<< HEAD
                         uint32_t timer_mie  = (csr_mie >> 7) & 1;
                         
                         if (timer_mie && mtime < mtimecmp && mtimecmp != -1ULL) {
                             mtime = mtimecmp; 
-=======
-                        // CORREÇÃO: Removemos a checagem de global_mie
-                        uint32_t timer_mie  = (csr_mie >> 7) & 1;
-                        
-                        if (timer_mie && mtime < mtimecmp && mtimecmp != -1ULL) {
-                            mtime = mtimecmp; // Pula o tempo instantaneamente
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
                         }
                     }
                     else if (imm_sys == 0x302) {     // MRET
@@ -1735,11 +1486,7 @@ int main(int argc, char* argv[]) {
                     out2(output, pc_curr, "csrrc", ops, msg);
                 }
                 else if (funct3 == 0b101) { // CSRRWI
-<<<<<<< HEAD
                     uint32_t zimm = rs1; 
-=======
-                    uint32_t zimm = rs1; // O field rs1 funciona como immediate (zimm)
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
                     if (rd != 0) x[rd] = old;
                     csr_write(csr_addr, zimm);
                     char ops[32], msg[96];
@@ -1787,7 +1534,6 @@ int main(int argc, char* argv[]) {
             }
             // -------- FENCE / FENCE.I --------
             case 0b0001111: {
-<<<<<<< HEAD
                 if (funct3 == 0b001) { // FENCE.I
                     out2(output, pc_curr, "fence.i", "", "");
                     for (int i = 0; i < CACHE_SETS; i++) {
@@ -1798,9 +1544,6 @@ int main(int argc, char* argv[]) {
                 } else {
                     out2(output, pc_curr, "fence", "", "");
                 }
-=======
-                out2(output, pc_curr, "fence", "", "");
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
                 break;
             }
             default: {
@@ -1817,29 +1560,17 @@ end_of_loop:
 
         mtime += 500; 
 
-<<<<<<< HEAD
         // Timer Check 
         if (mtime >= mtimecmp) csr_mip |=  (1u << 7);
         else                   csr_mip &= ~(1u << 7);
 
         // UART Check 
-=======
-        // Timer Check (Correto)
-        if (mtime >= mtimecmp) csr_mip |=  (1u << 7);
-        else                   csr_mip &= ~(1u << 7);
-
-        // UART Check (Corrigido: Só interrompe se tiver dados REAIS)
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
         if (uart_ready && !uart_fifo_empty()) {
              plic_irq10_pending = 1;
         } else {
              plic_irq10_pending = 0; 
         }
         
-<<<<<<< HEAD
-=======
-        // Verifica se o PLIC deixa a interrupção passar
->>>>>>> a609521c6c60085c77cce4a2d29e88735164b5f8
         int plic_uart_enabled = (plic_enable & (1u << 10));
         int plic_priority_ok  = (plic_priority_10 > plic_threshold);
 
