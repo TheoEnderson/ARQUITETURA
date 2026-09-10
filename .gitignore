@@ -1,3 +1,42 @@
-poximv3
-theodejesus_202400029086_poximv3
+# ==============================================================================
+# Git Ignore - Simulador RISC-V (Poxim-V)
+# ==============================================================================
 
+# Binários e executáveis compilados
+poxim
+poximv1
+poximv2
+poximv3
+bin/
+*.exe
+*.out
+*.app
+
+# Objetos e arquivos intermediários de build
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+build/
+
+# Profiling e relatórios de execução
+gmon.out
+
+# Arquivos temporários e backups de editores
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+.directory
+
+# Configurações de IDEs e editores de texto
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Sistema operacional
+.DS_Store
+Thumbs.db

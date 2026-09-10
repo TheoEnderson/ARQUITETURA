@@ -1,3 +1,23 @@
+/**
+ * ============================================================================
+ * Poxim-V Core Simulator — Stage 1: RV32I Base Integer ISA & RV32M Extension
+ * ============================================================================
+ * 
+ * Descrição do Módulo:
+ *   Emulador do núcleo básico de processamento da arquitetura RISC-V de 32 bits.
+ *   Suporta a decodificação e execução sequencial dos formatos de instrução
+ *   padrão (R, I, S, B, U, J), gestão do banco de 32 registradores gerais (x0-x31),
+ *   contador de programa (PC), carregador de memória a partir de hexdump e
+ *   gerador de trace de execução detalhado.
+ *
+ * Especificações Arquiteturais:
+ *   - ISA Base: RV32I (instruções aritméticas, lógicas, desvios, saltos, loads/stores)
+ *   - Extensão Padrão: RV32M (multiplicação e divisão inteira por hardware)
+ *   - Mapa de Memória: 32 KB de memória principal endereçada a partir de 0x80000000
+ *   - Saída: Formatação de desmontagem e rastro de registradores/memória
+ * ============================================================================
+ */
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>

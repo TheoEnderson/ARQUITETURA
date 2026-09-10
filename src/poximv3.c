@@ -1,3 +1,33 @@
+/**
+ * ============================================================================
+ * Poxim-V: RISC-V RV32I/M Full Architecture Simulator with L1 Caches & MMIO
+ * ============================================================================
+ * 
+ * Descrição do Módulo:
+ *   Simulador completo de nível de produção para arquitetura RISC-V de 32 bits.
+ *   Consolida o núcleo de execução inteira (RV32I) com aceleração de multiplicação
+ *   e divisão por hardware (RV32M), registradores de controle e estado (CSRs),
+ *   controlador de interrupções e exceções em Modo Máquina (M-Mode), emulação
+ *   de periféricos mapeados em memória (MMIO) e hierarquia de memória cache L1
+ *   separada (Harvard split: ICache e DCache).
+ *
+ * Especificações Arquiteturais:
+ *   - ISA Base: RV32I (instruções aritméticas, lógicas, de salto, desvio condicional, loads/stores)
+ *   - Extensão Padrão: RV32M (multiplicação MUL/MULH/MULHSU/MULHU e divisão DIV/DIVU/REM/REMU)
+ *   - Modo Privilegiado: Machine Mode (M-Mode) com suporte a traps e instrução mret
+ *   - Registradores CSR: mstatus, mtvec (direto/vetorado), mepc, mcause, mtval, mie, mip, contadores
+ *   - Interrupções e Exceções:
+ *       * Exceções síncronas: instrução ilegal, ecall, alinhamento/falha de acesso
+ *       * Interrupções assíncronas: MSIP (software), MTIP (temporizador CLINT), MEIP (externa PLIC)
+ *   - Subsistema de Memória Cache L1:
+ *       * Arquitetura dividida: Cache de Instruções (ICache) e Cache de Dados (DCache)
+ *       * Dimensões: 256 bytes por cache, blocos de 16 bytes (4 words), associativa por conjunto em 2 vias (8 sets)
+ *       * Políticas: Write-through, Write-allocate no hit / No-write-allocate no miss, substituição LRU
+ *       * Sincronização: Instruções FENCE e FENCE.I (invalidação de linhas de instrução)
+ *       * Telemetria: Rastreamento em tempo de execução de acessos, hits, misses e taxa de acerto final
+ * ============================================================================
+ */
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -119,7 +149,7 @@ static void cache_reset(cache_t *c) {
     memset(c, 0, sizeof(*c));
 }
 
-static void cache_invalidate(cache_t *c, uint32_t addr) {
+static __attribute__((unused)) void cache_invalidate(cache_t *c, uint32_t addr) {
     if (!cacheable(addr)) return;
     
     uint32_t si = set_index(addr);
@@ -334,7 +364,7 @@ static int uart_fifo_empty(void) {
     return (uart_head == uart_tail);
 }
 
-static void uart_fifo_push(uint8_t val) {
+static __attribute__((unused)) void uart_fifo_push(uint8_t val) {
     uint32_t next = (uart_head + 1) % 4096;
     if (next != uart_tail) {
         uart_fifo[uart_head] = val;
@@ -1536,7 +1566,7 @@ int main(int argc, char* argv[]) {
             case 0b0001111: {
                 if (funct3 == 0b001) { // FENCE.I
                     out2(output, pc_curr, "fence.i", "", "");
-                    for (int i = 0; i < CACHE_SETS; i++) {
+                    for (uint32_t i = 0; i < CACHE_SETS; i++) {
                         icache.set[i].way[0].valid = 0;
                         icache.set[i].way[1].valid = 0;
                         icache.set[i].lru = 0; 

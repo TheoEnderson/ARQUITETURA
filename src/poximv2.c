@@ -1,3 +1,28 @@
+/**
+ * ============================================================================
+ * Poxim-V Simulator — Stage 2: Privileged Architecture, Traps & MMIO
+ * ============================================================================
+ * 
+ * Descrição do Módulo:
+ *   Evolução do simulador RISC-V com suporte a recursos de software básico
+ *   e arquitetura privilegiada em Modo Máquina (M-Mode). Implementa registradores
+ *   de controle e estado (CSRs), instruções CSR, tratamento de armadilhas
+ *   síncronas (exceções), interrupções assíncronas priorizadas e barramento de
+ *   periféricos mapeados em memória (MMIO).
+ *
+ * Especificações Arquiteturais:
+ *   - Modo de Operação: Machine Mode (M-Mode) com retorno privilegiado (mret)
+ *   - Registradores CSR: mstatus, mtvec (direto/vetorado), mepc, mcause, mtval, mie, mip
+ *   - Instruções CSR: csrrw, csrrs, csrrwi, mret
+ *   - Exceções Síncronas: instrução ilegal, falhas de endereço/alinhamento, chamadas de sistema (ecall)
+ *   - Interrupções Assíncronas:
+ *       * Software Interrupt (MSIP via registrador de disparo rápido)
+ *       * Timer Interrupt (MTIP gerado por comparador mtime/mtimecmp no CLINT)
+ *       * External Interrupt (MEIP gerenciado por PLIC emulado)
+ *   - Periféricos MMIO: UART Loopback/Terminal (0x10000000/0x10000002), CLINT e PLIC
+ * ============================================================================
+ */
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -57,7 +82,7 @@ static uint32_t plic_enable      = 0;
 static uint32_t plic_threshold   = 0;  
 
 static int plic_irq10_pending = 0;     
-static int uart_irq_pending = 0;       
+static int uart_irq_pending __attribute__((unused)) = 0;       
 static int uart_ready = 0;           
 static int uart_eos_left = 0;
 static int uart_eos_seen = 0;
