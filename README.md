@@ -7,32 +7,39 @@
 ![Build System](https://img.shields.io/badge/Build-GNU%20Make-yellow.svg?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)
 
-O **Poxim-V** é um emulador de processador com arquitetura **RISC-V de 32 bits (RV32I/M)** de alto desempenho, implementado em C puro (C99). O projeto foi concebido para modelar com fidelidade o ciclo de instrução, manipulação do estado arquitetural da CPU, subsistemas de traps síncronas e assíncronas, barramento de periféricos mapeados em memória (**MMIO**) e uma hierarquia de **memória cache L1 dividida (Harvard split)** com telemetria detalhada de taxa de acerto (*hit/miss rate*).
+O **Poxim-V** é um Instruction Set Simulator (ISS) de RV32I/M construído do zero em C99 para modelar com fidelidade o ciclo de instrução, manipulação do estado arquitetural da CPU, subsistemas de traps síncronas e assíncronas, barramento de periféricos mapeados em memória (**MMIO**) e uma hierarquia de **memória cache L1 dividida (Harvard split)** com telemetria detalhada de taxa de acerto (*hit/miss rate*).
 
 ---
 
 ## 🏛️ Diagrama Arquitetural
 
 ```mermaid
-flowchart TD
+flowchart LR
+    classDef dark_cpu fill:#161b22,stroke:#bc8cff,stroke-width:1.5px,color:#c9d1d9
+    classDef dark_cache fill:#161b22,stroke:#3fb950,stroke-width:1.5px,color:#c9d1d9
+    classDef dark_bus fill:#161b22,stroke:#58a6ff,stroke-width:1.5px,color:#c9d1d9
+
     subgraph CPU["Núcleo RISC-V RV32I/M"]
-        REG["Banco de Registradores\n(x0 - x31, PC)"]
-        CSR["Registradores CSR (M-Mode)\nmstatus, mtvec, mepc,\nmcause, mtval, mie, mip"]
-        ALU["ALU & Unidade M\n(MUL, DIV, REM)"]
-        TRAP["Controlador de Traps\n(Exceções & Interrupções)"]
+        REG["Banco de Registradores\n(x0 - x31, PC)"]:::dark_cpu
+        CSR["Registradores CSR (M-Mode)\nmstatus, mtvec, mepc,\nmcause, mtval, mie, mip"]:::dark_cpu
+        ALU["ALU & Unidade M\n(MUL, DIV, REM)"]:::dark_cpu
+        TRAP["Controlador de Traps\n(Exceções & Interrupções)"]:::dark_cpu
     end
+    class CPU dark_cpu
 
     subgraph CACHE["Subsistema de Cache L1 (Associativa 2-Vias)"]
-        ICACHE["L1 Instruction Cache (256 B)\n8 Sets, 16 B/bloco, LRU"]
-        DCACHE["L1 Data Cache (256 B)\n8 Sets, 16 B/bloco, Write-Through"]
+        ICACHE["L1 Instruction Cache (256 B)\n8 Sets, 16 B/bloco, LRU"]:::dark_cache
+        DCACHE["L1 Data Cache (256 B)\n8 Sets, 16 B/bloco, Write-Through"]:::dark_cache
     end
+    class CACHE dark_cache
 
     subgraph BUS["Barramento de Sistema & MMIO"]
-        RAM["Memória Principal (RAM)\n32 KB @ 0x80000000"]
-        UART["UART Terminal\n0x10000000 / 0x10000002"]
-        CLINT["CLINT (Timer)\nmtime / mtimecmp\n0x02004000"]
-        PLIC["PLIC (Interrupções Externas)\nPrioridade, Enable, Claim\n0x0C000000"]
+        RAM["Memória Principal (RAM)\n32 KB @ 0x80000000"]:::dark_bus
+        UART["UART Terminal\n0x10000000 / 0x10000002"]:::dark_bus
+        CLINT["CLINT (Timer)\nmtime / mtimecmp\n0x02004000"]:::dark_bus
+        PLIC["PLIC (Interrupções Externas)\nPrioridade, Enable, Claim\n0x0C000000"]:::dark_bus
     end
+    class BUS dark_bus
 
     CPU -->|Fetch| ICACHE
     CPU -->|Load / Store| DCACHE
